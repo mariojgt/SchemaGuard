@@ -1,7 +1,8 @@
 import type { CanonicalType, ModelRelation } from "@schemaguard/core";
-import { ArrowLeftRight, ArrowRight, Box, Lightbulb, X } from "lucide-react";
+import { AlertTriangle, ArrowLeftRight, ArrowRight, Box, History, Lightbulb, Plus, X } from "lucide-react";
 import { useMemo } from "react";
 
+import { detectDrift, tableHistory } from "../lib/importInsights";
 import { buildInsights, describeRelation } from "../lib/modelInsights";
 import { RELATION_STYLE } from "../lib/relationStyle";
 import { useSchemaStore } from "../stores/schema";
@@ -38,6 +39,7 @@ export function ModelInsights({
   const schema = useSchemaStore((s) => s.schema);
   const modelInfos = useSchemaStore((s) => s.modelInfos);
   const modelRelations = useSchemaStore((s) => s.modelRelations);
+  const migrations = useSchemaStore((s) => s.migrations);
 
   const table = useMemo(
     () => schema.tables.find((t) => t.name === tableName),
@@ -59,6 +61,11 @@ export function ModelInsights({
     () => buildInsights({ table, info, outgoing, incoming, schema }),
     [table, info, outgoing, incoming, schema],
   );
+  const drift = useMemo(
+    () => detectDrift(schema, modelInfos, modelRelations).filter((d) => d.table === tableName),
+    [schema, modelInfos, modelRelations, tableName],
+  );
+  const history = useMemo(() => tableHistory(migrations, tableName), [migrations, tableName]);
 
   const title = info?.model ?? tableName;
   const fkCols = useMemo(
@@ -98,6 +105,22 @@ export function ModelInsights({
                   className={`rounded-lg border px-2.5 py-1.5 text-[11.5px] leading-snug ${TONE[ins.tone] ?? TONE.info}`}
                 >
                   {ins.text}
+                </div>
+              ))}
+            </div>
+          </Section>
+        )}
+
+        {/* Schema ⇄ model drift */}
+        {drift.length > 0 && (
+          <Section icon={<AlertTriangle size={12} />} title={`Drift · ${String(drift.length)}`}>
+            <div className="flex flex-col gap-1.5">
+              {drift.map((d, i) => (
+                <div
+                  key={i}
+                  className={`rounded-lg border px-2.5 py-1.5 text-[11.5px] leading-snug ${TONE[d.tone] ?? TONE.warn}`}
+                >
+                  {d.text}
                 </div>
               ))}
             </div>
@@ -178,6 +201,36 @@ export function ModelInsights({
                 />
               )}
             </dl>
+          </Section>
+        )}
+
+        {/* Migration history for this table */}
+        {history.length > 0 && (
+          <Section icon={<History size={12} />} title={`History · ${String(history.length)}`}>
+            <div className="flex flex-col gap-1.5">
+              {history.map((h, i) => (
+                <div key={i} className="flex items-start gap-2 text-[11.5px] leading-snug">
+                  <span className="mt-0.5 font-mono text-[10px] text-faint">
+                    {h.date || `#${String(i + 1)}`}
+                  </span>
+                  <span
+                    className={`mt-0.5 flex-none rounded px-1 py-0.5 text-[8.5px] font-bold uppercase ${
+                      h.kind === "create" ? "bg-acc/15 text-acc" : "bg-med/15 text-med"
+                    }`}
+                  >
+                    {h.kind === "create" ? (
+                      <Plus size={9} className="inline" />
+                    ) : (
+                      <ArrowRight size={9} className="inline" />
+                    )}{" "}
+                    {h.kind}
+                  </span>
+                  <span className="min-w-0 flex-1 text-dim">
+                    {h.details.length > 0 ? h.details.join(", ") : h.title}
+                  </span>
+                </div>
+              ))}
+            </div>
           </Section>
         )}
       </div>

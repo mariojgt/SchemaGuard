@@ -1,10 +1,20 @@
 import { parseLaravel, parseLaravelMigrations, parseSql } from "@schemaguard/core";
-import { Check, FileText, FolderOpen, X } from "lucide-react";
+import { AlertTriangle, Check, FileText, FolderOpen, ShieldCheck, X } from "lucide-react";
 import { useState } from "react";
 
+import type { DestructiveEntry, DriftIssue, ImportSummary } from "../lib/importInsights";
+import { destructiveOps, detectDrift, summarizeImport } from "../lib/importInsights";
 import { gridLayout } from "../lib/layout";
 import { pickFolderFiles, pickTextFiles } from "../lib/projectFile";
 import { useSchemaStore } from "../stores/schema";
+import { toast } from "../stores/toasts";
+
+interface ImportReport {
+  summary: ImportSummary;
+  drift: DriftIssue[];
+  destructive: DestructiveEntry[];
+  warnings: string[];
+}
 
 const GRADIENT = "linear-gradient(135deg,#ff3fa4,#a64bff)";
 
@@ -50,6 +60,7 @@ export function ImportDialog({ onClose }: { onClose: () => void }) {
   const [reading, setReading] = useState<"migrations" | "models" | null>(null);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [building, setBuilding] = useState(false);
+  const [report, setReport] = useState<ImportReport | null>(null);
 
   const runImport = (source: string) => {
     const { schema, warnings } = mode === "sql" ? parseSql(source) : parseLaravel(source);
@@ -62,11 +73,11 @@ export function ImportDialog({ onClose }: { onClose: () => void }) {
       return;
     }
     loadProject(schema, gridLayout(schema));
-    if (warnings.length > 0) {
-      alert(
-        `Imported ${String(schema.tables.length)} table(s) with notes:\n\n• ${warnings.slice(0, 8).join("\n• ")}`,
-      );
-    }
+    toast.success(
+      `Imported ${String(schema.tables.length)} table(s)${
+        warnings.length > 0 ? ` · ${String(warnings.length)} note(s)` : ""
+      }.`,
+    );
     onClose();
   };
 
@@ -92,7 +103,7 @@ export function ImportDialog({ onClose }: { onClose: () => void }) {
       try {
         const history = parseLaravelMigrations(migFiles, modelFiles);
         if (history.migrations.length === 0) {
-          alert("No Laravel migrations (Schema::create/table) found in the migrations folder.");
+          toast.error("No Laravel migrations (Schema::create/table) found in that folder.");
           return;
         }
         loadHistory(
@@ -105,14 +116,27 @@ export function ImportDialog({ onClose }: { onClose: () => void }) {
           },
           gridLayout(history.finalSchema),
         );
-        if (history.warnings.length > 0) {
-          alert(
-            `Imported ${String(history.migrations.length)} migrations with notes:\n\n• ${history.warnings.slice(0, 8).join("\n• ")}`,
-          );
-        }
-        onClose();
+        // Compute the import insights and show a summary instead of closing.
+        const drift = detectDrift(
+          history.finalSchema,
+          history.modelInfos,
+          history.modelRelations,
+        );
+        const summary = summarizeImport({
+          schema: history.finalSchema,
+          migrations: history.migrations,
+          modelInfos: history.modelInfos,
+          modelRelations: history.modelRelations,
+          driftIssues: drift.length,
+        });
+        setReport({
+          summary,
+          drift,
+          destructive: destructiveOps(history.migrations),
+          warnings: history.warnings,
+        });
       } catch (err) {
-        alert(`Couldn't build: ${err instanceof Error ? err.message : String(err)}`);
+        toast.error(`Couldn't build: ${err instanceof Error ? err.message : String(err)}`);
       } finally {
         setBuilding(false);
       }
@@ -136,6 +160,10 @@ export function ImportDialog({ onClose }: { onClose: () => void }) {
           e.stopPropagation();
         }}
       >
+        {report ? (
+          <ImportSummaryView report={report} onClose={onClose} />
+        ) : (
+          <>
         <div className="flex items-center gap-3 border-b border-line px-4 py-3">
           <span className="text-[14px] font-bold">Import</span>
           <div className="flex gap-0.5 rounded-lg border border-line bg-panel2 p-0.5 text-[12px]">
@@ -252,7 +280,156 @@ export function ImportDialog({ onClose }: { onClose: () => void }) {
             Build schema &amp; diagram
           </button>
         </div>
+          </>
+        )}
       </div>
+    </div>
+  );
+}
+
+/** Post-import overview: counts, risk, destructive ops, and schema↔model drift. */
+function ImportSummaryView({ report, onClose }: { report: ImportReport; onClose: () => void }) {
+  const { summary: s, drift, destructive, warnings } = report;
+  const stats: { label: string; value: number }[] = [
+    { label: "migrations", value: s.migrations },
+    { label: "tables", value: s.tables },
+    { label: "columns", value: s.columns },
+    { label: "foreign keys", value: s.foreignKeys },
+    { label: "indexes", value: s.indexes },
+    { label: "relationships", value: s.relationships },
+  ];
+  return (
+    <>
+      <div className="flex items-center gap-2 border-b border-line px-4 py-3">
+        <span className="grid h-[18px] w-[18px] place-items-center rounded bg-low/20 text-low">
+          <Check size={12} strokeWidth={3} />
+        </span>
+        <span className="text-[14px] font-bold">Import complete</span>
+        {(s.dateFrom ?? s.dateTo) && (
+          <span className="font-mono text-[11px] text-faint">
+            {s.dateFrom} → {s.dateTo}
+          </span>
+        )}
+        <button
+          type="button"
+          onClick={onClose}
+          className="ml-auto grid place-items-center text-faint hover:text-ink"
+        >
+          <X size={15} />
+        </button>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-auto p-4">
+        <div className="grid grid-cols-3 gap-2">
+          {stats.map((st) => (
+            <div key={st.label} className="lit rounded-lg border border-line bg-panel2 px-3 py-2">
+              <div className="font-mono text-[18px] font-bold tabular-nums">{st.value}</div>
+              <div className="text-[10.5px] uppercase tracking-wider text-faint">{st.label}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Risk chips */}
+        <div className="mt-3 flex flex-wrap gap-2">
+          {s.risky > 0 ? (
+            <Chip tone="crit" icon={<AlertTriangle size={11} />} text={`${String(s.risky)} risky migration${s.risky === 1 ? "" : "s"}`} />
+          ) : (
+            <Chip tone="low" icon={<ShieldCheck size={11} />} text="No risky migrations" />
+          )}
+          {s.irreversible > 0 && (
+            <Chip tone="med" text={`${String(s.irreversible)} without down()`} />
+          )}
+          {s.destructive > 0 && (
+            <Chip tone="high" text={`${String(s.destructive)} destructive op${s.destructive === 1 ? "" : "s"}`} />
+          )}
+          {s.driftIssues > 0 ? (
+            <Chip tone="med" text={`${String(s.driftIssues)} drift issue${s.driftIssues === 1 ? "" : "s"}`} />
+          ) : (
+            s.models > 0 && <Chip tone="low" icon={<Check size={11} />} text="Models match schema" />
+          )}
+          <Chip tone="info" text={`${String(s.models)} model${s.models === 1 ? "" : "s"}`} />
+        </div>
+
+        {destructive.length > 0 && (
+          <SummarySection title={`Destructive operations · ${String(destructive.length)}`}>
+            {destructive.map((d, i) => (
+              <div key={i} className="flex items-center gap-2 py-0.5 text-[11.5px]">
+                <span className="font-mono text-[10px] text-faint">{d.date || "—"}</span>
+                <span className="rounded bg-crit/15 px-1.5 py-0.5 text-[9.5px] font-bold uppercase text-crit">
+                  {d.op.kind}
+                </span>
+                <span className="truncate text-dim">
+                  {d.op.table}
+                  {d.op.column ? `.${d.op.column}` : ""}
+                  {d.op.detail ? ` — ${d.op.detail}` : ""}
+                </span>
+              </div>
+            ))}
+          </SummarySection>
+        )}
+
+        {drift.length > 0 && (
+          <SummarySection title={`Schema ⇄ model drift · ${String(drift.length)}`}>
+            {drift.map((d, i) => (
+              <div key={i} className="flex items-start gap-2 py-0.5 text-[11.5px] leading-snug">
+                <span className="mt-0.5 flex-none font-semibold text-ink">{d.model}</span>
+                <span className={d.tone === "warn" ? "text-med" : "text-acc2"}>{d.text}</span>
+              </div>
+            ))}
+          </SummarySection>
+        )}
+
+        {warnings.length > 0 && (
+          <SummarySection title={`Parse notes · ${String(warnings.length)}`}>
+            {warnings.slice(0, 12).map((w, i) => (
+              <div key={i} className="py-0.5 text-[11.5px] text-dim">
+                • {w}
+              </div>
+            ))}
+          </SummarySection>
+        )}
+      </div>
+
+      <div className="flex items-center justify-end gap-2 border-t border-line px-4 py-3">
+        <button
+          type="button"
+          onClick={onClose}
+          className="rounded-lg px-4 py-1.5 text-[12.5px] font-semibold text-white"
+          style={{ background: GRADIENT }}
+        >
+          Done
+        </button>
+      </div>
+    </>
+  );
+}
+
+const CHIP_TONE: Record<string, string> = {
+  crit: "border-crit/40 bg-crit/10 text-crit",
+  high: "border-high/40 bg-high/10 text-high",
+  med: "border-med/40 bg-med/10 text-med",
+  low: "border-low/40 bg-low/10 text-low",
+  info: "border-acc2/40 bg-acc2/10 text-acc2",
+};
+
+function Chip({ tone, icon, text }: { tone: string; icon?: React.ReactNode; text: string }) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold ${CHIP_TONE[tone] ?? CHIP_TONE.info}`}
+    >
+      {icon}
+      {text}
+    </span>
+  );
+}
+
+function SummarySection({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="mt-4">
+      <div className="mb-1.5 text-[10.5px] font-bold uppercase tracking-wider text-faint">
+        {title}
+      </div>
+      <div className="rounded-lg border border-line bg-panel2 px-3 py-2">{children}</div>
     </div>
   );
 }

@@ -293,8 +293,8 @@ export async function runAssistant(
   const tools = buildTools(ctx, actions);
 
   // streamText surfaces stream errors through onError rather than throwing from
-  // the iterator, so capture it and rethrow for the caller's catch.
-  let streamError: unknown = null;
+  // the iterator, so capture the message and rethrow for the caller's catch.
+  let streamErrorMessage = "";
   const result = streamText({
     model: resolveModel(option, apiKey),
     system: buildSystem(ctx),
@@ -306,7 +306,12 @@ export async function runAssistant(
     stopWhen: stepCountIs(8),
     maxOutputTokens: 8000,
     onError: ({ error }) => {
-      streamError = error;
+      streamErrorMessage =
+        error instanceof Error
+          ? error.message
+          : typeof error === "string"
+            ? error
+            : "The model stream failed.";
     },
   });
 
@@ -316,7 +321,7 @@ export async function runAssistant(
     onDelta?.(text);
   }
 
-  if (streamError) throw streamError instanceof Error ? streamError : new Error(String(streamError));
+  if (streamErrorMessage) throw new Error(streamErrorMessage);
 
   const steps = await result.steps;
   const appliedToCanvas = steps.some((step) =>
