@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 
 export type MenuItem =
   | "separator"
@@ -21,36 +21,45 @@ export function ContextMenu({
   items: MenuItem[];
   onClose: () => void;
 }) {
+  const ref = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
-    const close = () => {
+    // Close when the user presses down anywhere outside the menu. Using
+    // `mousedown` (not click) means a left-click on a menu item still fires its
+    // onClick first; a right-click elsewhere closes this menu and lets the new
+    // target open its own. Registered on the next tick so the very event that
+    // opened the menu doesn't immediately dismiss it.
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) onClose();
+    };
+    const onScroll = () => {
       onClose();
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
-    window.addEventListener("click", close);
-    window.addEventListener("contextmenu", close);
-    window.addEventListener("scroll", close, true);
-    window.addEventListener("keydown", onKey);
+    const id = window.setTimeout(() => {
+      window.addEventListener("mousedown", onDown, true);
+      window.addEventListener("scroll", onScroll, true);
+      window.addEventListener("keydown", onKey);
+    }, 0);
     return () => {
-      window.removeEventListener("click", close);
-      window.removeEventListener("contextmenu", close);
-      window.removeEventListener("scroll", close, true);
+      window.clearTimeout(id);
+      window.removeEventListener("mousedown", onDown, true);
+      window.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("keydown", onKey);
     };
   }, [onClose]);
 
   // Keep the menu on screen (rough clamp; menu is ~240px wide).
-  const left = Math.min(x, window.innerWidth - 248);
-  const top = Math.min(y, window.innerHeight - (items.length * 30 + 12));
+  const left = Math.max(8, Math.min(x, window.innerWidth - 248));
+  const top = Math.max(8, Math.min(y, window.innerHeight - (items.length * 30 + 12)));
 
   return (
     <div
+      ref={ref}
       className="glass-strong fixed z-[60] min-w-[200px] animate-pop overflow-hidden rounded-lg border border-line/70 py-1 shadow-2xl"
       style={{ left, top }}
-      onClick={(e) => {
-        e.stopPropagation();
-      }}
       onContextMenu={(e) => {
         e.preventDefault();
         e.stopPropagation();

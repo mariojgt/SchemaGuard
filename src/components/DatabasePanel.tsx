@@ -1,18 +1,22 @@
-import type { Schema } from "@schemaguard/core";
+import type { CanonicalType, Schema, Table } from "@schemaguard/core";
 import {
   Check,
   ChevronLeft,
   ChevronRight,
   Copy,
   Database,
+  Download,
   Equal,
   Filter,
   GitBranch,
   Hash,
+  KeyRound,
+  ListTree,
   Pencil,
   Play,
   Plug,
   PlugZap,
+  Plus,
   Search,
   Table2,
   Trash2,
@@ -24,7 +28,9 @@ import { autoLayout } from "../lib/autoLayout";
 import type { ColumnValue } from "../lib/browseQuery";
 import {
   buildBrowseQuery,
+  buildDeleteQuery,
   buildFilterQuery,
+  buildInsertQuery,
   buildUpdateQuery,
   quoteIdent,
   whereSnippet,
@@ -39,7 +45,9 @@ import {
   dbTables,
   isDesktop,
 } from "../lib/db";
+import { toCsv, toSqlInserts } from "../lib/exportData";
 import { fetchPrimaryKey, introspectSchema } from "../lib/introspect";
+import { downloadText } from "../lib/projectFile";
 import { useConnections } from "../stores/connections";
 import { useSchemaStore } from "../stores/schema";
 import { toast } from "../stores/toasts";
@@ -91,8 +99,13 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
   const [importing, setImporting] = useState(false);
   const [tables, setTables] = useState<string[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
-  const [view, setView] = useState<"data" | "query" | "diagram">("data");
+  const [view, setView] = useState<"data" | "structure" | "query" | "diagram">("data");
   const [offset, setOffset] = useState(0);
+  const [rowCount, setRowCount] = useState<number | null>(null);
+  const [inserting, setInserting] = useState(false);
+  // Recent successfully-run queries from the Query tab (newest first).
+  const [history, setHistory] = useState<string[]>([]);
+  const [exportOpen, setExportOpen] = useState(false);
   // phpMyAdmin-style find/sort: filter the table list, and search + sort rows.
   const [tableFilter, setTableFilter] = useState("");
   const [search, setSearch] = useState("");
@@ -209,6 +222,8 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
     setDiagramSchema(null);
     setDiagramError(null);
     setPkColumns([]);
+    setRowCount(null);
+    setInserting(false);
   };
 
   // Look up the table's primary key so rows can be edited safely (best-effort).
@@ -221,15 +236,35 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
       });
   };
 
+  // Best-effort total row count for the open table (phpMyAdmin shows this).
+  const loadCount = (id: string, table: string) => {
+    setRowCount(null);
+    void dbQuery(id, `SELECT COUNT(*) AS n FROM ${quoteIdent(connDialect, table)}`)
+      .then((r) => {
+        const n = Number(r.rows[0]?.[0] ?? "");
+        setRowCount(Number.isFinite(n) ? n : null);
+      })
+      .catch(() => {
+        setRowCount(null);
+      });
+  };
+
   const openTable = (t: string) => {
     if (!connId) return;
     setSelected(t);
+    setInserting(false);
+    // Clicking a table while on the Structure tab keeps you there for that table.
+    if (view === "structure") {
+      ensureIntrospected();
+      return;
+    }
     setView("data");
     setOffset(0);
     setSearch("");
     setSort(null);
     loadData(connId, t, 0, "", null);
     loadPk(connId, connDialect, t);
+    loadCount(connId, t);
   };
 
   // Save an edited row: UPDATE the changed cells, keyed by primary key.
@@ -278,6 +313,88 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
     }
   };
 
+  // Insert a new row. Columns left blank are omitted so DB defaults / auto-
+  // increment apply. Returns true on success so the form can close.
+  const insertRow = async (draft: (string | null)[]): Promise<boolean> => {
+    if (!connId || !selected || !result) return false;
+    const values: ColumnValue[] = [];
+    result.columns.forEach((c, j) => {
+      const v = draft[j];
+      // undefined/"" → omit (use default); explicit null → NULL.
+      if (v !== undefined && v !== "") values.push({ column: c, value: v });
+    });
+    if (values.length === 0) {
+      toast.error("Enter at least one value to insert.");
+      return false;
+    }
+    try {
+      const sql = buildInsertQuery({ dialect: connDialect, table: selected, values });
+      await dbExecute(connId, sql);
+      toast.success("Row inserted.");
+      setInserting(false);
+      loadData(connId, selected, offset, search, sort);
+      loadCount(connId, selected);
+      return true;
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : String(e));
+      return false;
+    }
+  };
+
+  // Delete one row, keyed by primary key.
+  const deleteRow = async (row: (string | null)[]): Promise<boolean> => {
+    if (!connId || !selected || !result) return false;
+    if (pkColumns.length === 0) {
+      toast.error(`"${selected}" has no primary key — rows can't be deleted safely.`);
+      return false;
+    }
+    const cols = result.columns;
+    const where: ColumnValue[] = [];
+    for (const pc of pkColumns) {
+      const idx = cols.indexOf(pc);
+      if (idx === -1) {
+        toast.error(`Primary key column "${pc}" isn't in the result — can't target the row.`);
+        return false;
+      }
+      where.push({ column: pc, value: row[idx] ?? null });
+    }
+    try {
+      const sql = buildDeleteQuery({ dialect: connDialect, table: selected, where });
+      const affected = await dbExecute(connId, sql);
+      if (affected === 0) {
+        toast.error("No rows deleted — it may have already been removed.");
+        return false;
+      }
+      toast.success("Row deleted.");
+      loadData(connId, selected, offset, search, sort);
+      loadCount(connId, selected);
+      return true;
+    } catch (e: unknown) {
+      toast.error(e instanceof Error ? e.message : String(e));
+      return false;
+    }
+  };
+
+  // Export the current result grid to a downloaded CSV or SQL file.
+  const exportResult = (format: "csv" | "sql") => {
+    setExportOpen(false);
+    if (!result || result.columns.length === 0) {
+      toast.error("Nothing to export.");
+      return;
+    }
+    const base = selected ?? "query";
+    if (format === "csv") {
+      downloadText(`${base}.csv`, toCsv(result.columns, result.rows), "text/csv");
+    } else {
+      downloadText(
+        `${base}.sql`,
+        toSqlInserts(connDialect, base, result.columns, result.rows),
+        "text/plain",
+      );
+    }
+    toast.success(`Exported ${String(result.rows.length)} row(s) as ${format.toUpperCase()}.`);
+  };
+
   const page = (delta: number) => {
     if (!connId || !selected) return;
     const next = Math.max(0, offset + delta * PAGE);
@@ -302,9 +419,9 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
     loadData(connId, selected, 0, search, next);
   };
 
-  // Switch to the inline diagram tab; introspect once and cache it.
-  const openDiagram = () => {
-    setView("diagram");
+  // Introspect the live database once and cache it; both the Structure and
+  // Diagram tabs read from this. No-op if already loaded or loading.
+  const ensureIntrospected = () => {
     if (diagramSchema || diagramLoading || !connId) return;
     setDiagramLoading(true);
     setDiagramError(null);
@@ -318,6 +435,18 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
       .finally(() => {
         setDiagramLoading(false);
       });
+  };
+
+  const openDiagram = () => {
+    setView("diagram");
+    ensureIntrospected();
+  };
+
+  // Show the selected table's columns, keys, indexes and FKs (phpMyAdmin's
+  // "Structure" tab) from the cached introspection.
+  const openStructure = () => {
+    setView("structure");
+    ensureIntrospected();
   };
 
   const importToDiagram = () => {
@@ -345,6 +474,11 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
     if (!connId) return;
     setLoading(true);
     setResultError(null);
+    const trimmed = sql.trim();
+    if (trimmed.length > 0) {
+      // Record in history (newest first, deduped, capped).
+      setHistory((h) => [trimmed, ...h.filter((q) => q !== trimmed)].slice(0, 15));
+    }
     dbQuery(connId, sql)
       .then((r) => {
         setResult(r);
@@ -457,6 +591,40 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
         label: "Copy WHERE clause",
         icon: <Copy size={13} />,
         onClick: () => copy(whereSnippet(connDialect, column, "=", value), "WHERE clause"),
+      },
+    ];
+  };
+
+  // Right-click a column in the Structure tab → quick scaffolds for that column.
+  const columnMenu = (column: string): MenuItem[] => {
+    if (!selected) return [];
+    const tbl = quoteIdent(connDialect, selected);
+    const col = quoteIdent(connDialect, column);
+    return [
+      { label: "Browse table", icon: <Table2 size={13} />, onClick: () => openTable(selected) },
+      {
+        label: `SELECT ${column} (LIMIT 100)`,
+        icon: <Play size={13} />,
+        onClick: () => openInQuery(`SELECT ${col} FROM ${tbl} LIMIT 100;`),
+      },
+      {
+        label: `Sort by ${column}`,
+        icon: <Filter size={13} />,
+        onClick: () => openInQuery(`SELECT * FROM ${tbl} ORDER BY ${col} ASC LIMIT 100;`),
+      },
+      {
+        label: "Count distinct values",
+        icon: <Hash size={13} />,
+        onClick: () =>
+          openInQuery(
+            `SELECT ${col}, COUNT(*) AS count FROM ${tbl} GROUP BY ${col} ORDER BY count DESC LIMIT 100;`,
+          ),
+      },
+      "separator",
+      {
+        label: "Copy column name",
+        icon: <Copy size={13} />,
+        onClick: () => copy(column, "column name"),
       },
     ];
   };
@@ -642,6 +810,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
         <span className="text-[12.5px] font-semibold">{connName}</span>
         <div className="ml-3 flex gap-0.5 rounded-lg border border-line bg-panel2 p-0.5">
           <Tab label="Data" active={view === "data"} onClick={() => setView("data")} />
+          <Tab label="Structure" active={view === "structure"} onClick={openStructure} />
           <Tab label="Query" active={view === "query"} onClick={() => setView("query")} />
           <Tab label="Diagram" active={view === "diagram"} onClick={openDiagram} />
         </div>
@@ -727,7 +896,9 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                     setMenu({ x: e.clientX, y: e.clientY, items: tableMenu(t) });
                   }}
                   className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] ${
-                    selected === t && view === "data" ? "bg-acc/15 text-acc" : "hover:bg-panel2"
+                    selected === t && (view === "data" || view === "structure")
+                      ? "bg-acc/15 text-acc"
+                      : "hover:bg-panel2"
                   }`}
                 >
                   <Table2 size={13} className="flex-none opacity-70" />
@@ -743,33 +914,74 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
 
           <section className="flex min-h-0 flex-col">
             {view === "query" && (
-              <div className="flex flex-none items-end gap-2 border-b border-line p-2">
-                <textarea
-                  value={query}
-                  onChange={(e) => {
-                    setQuery(e.target.value);
-                  }}
-                  onKeyDown={(e) => {
-                    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-                      e.preventDefault();
+              <div className="flex flex-none flex-col gap-2 border-b border-line p-2">
+                <div className="flex items-center gap-2">
+                  <select
+                    value=""
+                    disabled={history.length === 0}
+                    onChange={(e) => {
+                      if (e.target.value) setQuery(e.target.value);
+                    }}
+                    title="Recent queries"
+                    className="max-w-[260px] rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] outline-none disabled:opacity-40"
+                  >
+                    <option value="">{history.length > 0 ? "Recent queries…" : "No history yet"}</option>
+                    {history.map((h, i) => (
+                      <option key={i} value={h}>
+                        {h.replace(/\s+/g, " ").slice(0, 70)}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="ml-auto text-[11px] text-faint">Export result:</span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      exportResult("csv");
+                    }}
+                    disabled={!result || result.rows.length === 0}
+                    className="rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] hover:border-line2 disabled:opacity-40"
+                  >
+                    CSV
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      exportResult("sql");
+                    }}
+                    disabled={!result || result.rows.length === 0}
+                    className="rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] hover:border-line2 disabled:opacity-40"
+                  >
+                    SQL
+                  </button>
+                </div>
+                <div className="flex items-end gap-2">
+                  <textarea
+                    value={query}
+                    onChange={(e) => {
+                      setQuery(e.target.value);
+                    }}
+                    onKeyDown={(e) => {
+                      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                        e.preventDefault();
+                        runQuery();
+                      }
+                    }}
+                    spellCheck={false}
+                    placeholder="SELECT * FROM users;"
+                    className="h-16 flex-1 resize-none rounded-lg border border-line bg-panel2 p-2 font-mono text-[12px] outline-none focus:border-acc"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
                       runQuery();
-                    }
-                  }}
-                  spellCheck={false}
-                  placeholder="SELECT * FROM users;"
-                  className="h-16 flex-1 resize-none rounded-lg border border-line bg-panel2 p-2 font-mono text-[12px] outline-none focus:border-acc"
-                />
-                <button
-                  type="button"
-                  onClick={() => {
-                    runQuery();
-                  }}
-                  className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-[12.5px] font-semibold text-white shadow-glow"
-                  style={{ background: GRADIENT }}
-                >
-                  <Play size={14} />
-                  Run
-                </button>
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-[12.5px] font-semibold text-white shadow-glow"
+                    style={{ background: GRADIENT }}
+                  >
+                    <Play size={14} />
+                    Run
+                  </button>
+                </div>
               </div>
             )}
 
@@ -806,8 +1018,58 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                     </button>
                   )}
                 </div>
-                <span className="ml-auto">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setInserting((v) => !v);
+                  }}
+                  className={`ml-auto inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11.5px] ${
+                    inserting
+                      ? "border-acc/40 bg-acc/15 text-acc"
+                      : "border-line bg-panel2 hover:border-line2"
+                  }`}
+                >
+                  <Plus size={13} />
+                  Insert row
+                </button>
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setExportOpen((v) => !v);
+                    }}
+                    disabled={!result || result.rows.length === 0}
+                    className="inline-flex items-center gap-1 rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] hover:border-line2 disabled:opacity-40"
+                  >
+                    <Download size={13} />
+                    Export
+                  </button>
+                  {exportOpen && (
+                    <div className="absolute right-0 top-8 z-20 w-32 overflow-hidden rounded-lg border border-line bg-panel2 shadow-xl">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          exportResult("csv");
+                        }}
+                        className="block w-full px-3 py-1.5 text-left text-[12px] hover:bg-panel3"
+                      >
+                        CSV
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          exportResult("sql");
+                        }}
+                        className="block w-full px-3 py-1.5 text-left text-[12px] hover:bg-panel3"
+                      >
+                        SQL inserts
+                      </button>
+                    </div>
+                  )}
+                </div>
+                <span>
                   rows {offset + 1}–{offset + (result?.rows.length ?? 0)}
+                  {rowCount !== null && <span className="text-faint"> of {rowCount}</span>}
                 </span>
                 <button
                   type="button"
@@ -833,30 +1095,57 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
             )}
 
             <div className="min-h-0 flex-1 overflow-auto">
-              {loading && <div className="p-4 text-[12px] text-dim">Loading…</div>}
-              {!loading && resultError && (
-                <div className="m-3 rounded-lg border border-crit/40 bg-crit/10 p-3 font-mono text-[11.5px] text-crit">
-                  {resultError}
-                </div>
+              {view === "structure" ? (
+                <StructureView
+                  loading={diagramLoading}
+                  error={diagramError}
+                  selected={selected}
+                  table={
+                    selected ? diagramSchema?.tables.find((t) => t.name === selected) : undefined
+                  }
+                  onColumnMenu={(e, column) => {
+                    e.preventDefault();
+                    setMenu({ x: e.clientX, y: e.clientY, items: columnMenu(column) });
+                  }}
+                />
+              ) : (
+                <>
+                  {loading && <div className="p-4 text-[12px] text-dim">Loading…</div>}
+                  {!loading && resultError && (
+                    <div className="m-3 rounded-lg border border-crit/40 bg-crit/10 p-3 font-mono text-[11.5px] text-crit">
+                      {resultError}
+                    </div>
+                  )}
+                  {!loading && !resultError && view === "data" && inserting && selected && result && (
+                    <InsertRow
+                      columns={result.columns}
+                      onCancel={() => {
+                        setInserting(false);
+                      }}
+                      onInsert={insertRow}
+                    />
+                  )}
+                  {!loading &&
+                    !resultError &&
+                    result &&
+                    (view === "data" ? (
+                      <ResultGrid
+                        result={result}
+                        sort={sort}
+                        onSort={toggleSort}
+                        pkColumns={pkColumns}
+                        onSaveRow={saveRow}
+                        onDeleteRow={deleteRow}
+                        onCellMenu={(e, column, value) => {
+                          e.preventDefault();
+                          setMenu({ x: e.clientX, y: e.clientY, items: cellMenu(column, value) });
+                        }}
+                      />
+                    ) : (
+                      <ResultGrid result={result} />
+                    ))}
+                </>
               )}
-              {!loading &&
-                !resultError &&
-                result &&
-                (view === "data" ? (
-                  <ResultGrid
-                    result={result}
-                    sort={sort}
-                    onSort={toggleSort}
-                    pkColumns={pkColumns}
-                    onSaveRow={saveRow}
-                    onCellMenu={(e, column, value) => {
-                      e.preventDefault();
-                      setMenu({ x: e.clientX, y: e.clientY, items: cellMenu(column, value) });
-                    }}
-                  />
-                ) : (
-                  <ResultGrid result={result} />
-                ))}
             </div>
           </section>
         </div>
@@ -882,6 +1171,7 @@ function ResultGrid({
   onSort,
   pkColumns,
   onSaveRow,
+  onDeleteRow,
   onCellMenu,
 }: {
   result: QueryResult;
@@ -889,10 +1179,12 @@ function ResultGrid({
   onSort?: (col: string) => void;
   pkColumns?: string[];
   onSaveRow?: (original: (string | null)[], next: (string | null)[]) => Promise<boolean>;
+  onDeleteRow?: (row: (string | null)[]) => Promise<boolean>;
   onCellMenu?: (e: React.MouseEvent, column: string, value: string | null) => void;
 }) {
   const editable = !!onSaveRow && (pkColumns?.length ?? 0) > 0;
   const [editing, setEditing] = useState<number | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
   const [draft, setDraft] = useState<(string | null)[]>([]);
   const [saving, setSaving] = useState(false);
 
@@ -980,17 +1272,61 @@ function ResultGrid({
                         <X size={13} />
                       </button>
                     </div>
+                  ) : confirmDelete === i ? (
+                    <div className="flex gap-1">
+                      <button
+                        type="button"
+                        title="Confirm delete"
+                        disabled={saving}
+                        onClick={() => {
+                          if (!onDeleteRow) return;
+                          setSaving(true);
+                          void onDeleteRow(row).finally(() => {
+                            setSaving(false);
+                            setConfirmDelete(null);
+                          });
+                        }}
+                        className="grid h-6 w-6 place-items-center rounded bg-crit/20 text-crit hover:bg-crit/30 disabled:opacity-40"
+                      >
+                        <Check size={13} />
+                      </button>
+                      <button
+                        type="button"
+                        title="Cancel"
+                        disabled={saving}
+                        onClick={() => {
+                          setConfirmDelete(null);
+                        }}
+                        className="grid h-6 w-6 place-items-center rounded border border-line hover:border-line2 disabled:opacity-40"
+                      >
+                        <X size={13} />
+                      </button>
+                    </div>
                   ) : (
-                    <button
-                      type="button"
-                      title="Edit row"
-                      onClick={() => {
-                        startEdit(i);
-                      }}
-                      className="grid h-6 w-6 place-items-center rounded text-faint hover:bg-panel2 hover:text-ink"
-                    >
-                      <Pencil size={12} />
-                    </button>
+                    <div className="flex gap-0.5">
+                      <button
+                        type="button"
+                        title="Edit row"
+                        onClick={() => {
+                          startEdit(i);
+                        }}
+                        className="grid h-6 w-6 place-items-center rounded text-faint hover:bg-panel2 hover:text-ink"
+                      >
+                        <Pencil size={12} />
+                      </button>
+                      {onDeleteRow && (
+                        <button
+                          type="button"
+                          title="Delete row"
+                          onClick={() => {
+                            setConfirmDelete(i);
+                          }}
+                          className="grid h-6 w-6 place-items-center rounded text-faint hover:bg-crit/15 hover:text-crit"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      )}
+                    </div>
                   )}
                 </td>
               )}
@@ -1106,5 +1442,197 @@ function Tab({ label, active, onClick }: { label: string; active: boolean; onCli
     >
       {label}
     </button>
+  );
+}
+
+/** A blank-field form to INSERT a new row. Empty fields fall back to defaults. */
+function InsertRow({
+  columns,
+  onCancel,
+  onInsert,
+}: {
+  columns: string[];
+  onCancel: () => void;
+  onInsert: (draft: (string | null)[]) => Promise<boolean>;
+}) {
+  const [draft, setDraft] = useState<(string | null)[]>(() => columns.map(() => ""));
+  const [saving, setSaving] = useState(false);
+
+  const submit = () => {
+    setSaving(true);
+    void onInsert(draft).finally(() => {
+      setSaving(false);
+    });
+  };
+
+  return (
+    <div className="border-b border-line bg-acc/5 p-3">
+      <div className="mb-2 flex items-center gap-2 text-[11.5px]">
+        <Plus size={13} className="text-acc" />
+        <span className="font-semibold text-ink">New row</span>
+        <span className="text-faint">— leave a field blank to use its default</span>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {columns.map((c, j) => (
+          <label key={c} className="flex flex-col gap-0.5">
+            <span className="font-mono text-[10.5px] text-faint">{c}</span>
+            <input
+              value={draft[j] ?? ""}
+              spellCheck={false}
+              onChange={(e) => {
+                setDraft((d) => d.map((x, k) => (k === j ? e.target.value : x)));
+              }}
+              className="w-40 rounded border border-line bg-panel px-1.5 py-1 font-mono text-[12px] outline-none focus:border-acc"
+            />
+          </label>
+        ))}
+      </div>
+      <div className="mt-2.5 flex gap-2">
+        <button
+          type="button"
+          onClick={submit}
+          disabled={saving}
+          className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-semibold text-white shadow-glow disabled:opacity-40"
+          style={{ background: GRADIENT }}
+        >
+          <Check size={13} />
+          {saving ? "Inserting…" : "Insert"}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={saving}
+          className="rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12px] hover:border-line2 disabled:opacity-40"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** A compact, human-readable label for a canonical column type. */
+function typeLabel(t: CanonicalType): string {
+  switch (t.kind) {
+    case "serial":
+      return t.size === "big" ? "bigserial" : t.size === "small" ? "smallserial" : "serial";
+    case "int":
+      return t.size === "big" ? "bigint" : t.size === "small" ? "smallint" : "int";
+    case "decimal":
+      return `decimal(${String(t.precision)},${String(t.scale)})`;
+    case "string":
+      return `varchar(${String(t.length)})`;
+    default:
+      return t.kind;
+  }
+}
+
+/** phpMyAdmin-style "Structure" view: columns, keys, indexes and FKs of a table. */
+function StructureView({
+  loading,
+  error,
+  selected,
+  table,
+  onColumnMenu,
+}: {
+  loading: boolean;
+  error: string | null;
+  selected: string | null;
+  table: Table | undefined;
+  onColumnMenu: (e: React.MouseEvent, column: string) => void;
+}) {
+  if (loading) return <div className="p-4 text-[12px] text-dim">Reading the database schema…</div>;
+  if (error)
+    return (
+      <div className="m-3 rounded-lg border border-crit/40 bg-crit/10 p-3 font-mono text-[11.5px] text-crit">
+        {error}
+      </div>
+    );
+  if (!selected) return <div className="p-4 text-[12px] text-dim">Select a table on the left to view its structure.</div>;
+  if (!table)
+    return <div className="p-4 text-[12px] text-dim">No structure found for “{selected}”.</div>;
+
+  const pk = new Set(table.primaryKey ?? []);
+
+  return (
+    <div className="space-y-4 p-3">
+      <div>
+        <div className="mb-1.5 flex items-center gap-2 text-[12.5px] font-semibold">
+          <Table2 size={14} className="text-acc" />
+          {table.name}
+          <span className="text-[11px] font-normal text-faint">· {table.columns.length} columns</span>
+        </div>
+        <table className="w-full border-collapse text-[12px]">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wider text-faint">
+              <th className="border-b border-line px-3 py-1.5 font-semibold">Column</th>
+              <th className="border-b border-line px-3 py-1.5 font-semibold">Type</th>
+              <th className="border-b border-line px-3 py-1.5 font-semibold">Null</th>
+              <th className="border-b border-line px-3 py-1.5 font-semibold">Key</th>
+            </tr>
+          </thead>
+          <tbody>
+            {table.columns.map((col) => (
+              <tr
+                key={col.name}
+                onContextMenu={(e) => {
+                  onColumnMenu(e, col.name);
+                }}
+                className="cursor-context-menu hover:bg-panel2/60"
+              >
+                <td className="border-b border-line/50 px-3 py-1.5 font-mono">{col.name}</td>
+                <td className="border-b border-line/50 px-3 py-1.5 font-mono text-acc2">
+                  {typeLabel(col.type)}
+                </td>
+                <td className="border-b border-line/50 px-3 py-1.5 text-dim">
+                  {col.nullable ? "YES" : "NO"}
+                </td>
+                <td className="border-b border-line/50 px-3 py-1.5">
+                  {pk.has(col.name) && (
+                    <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-high">
+                      <KeyRound size={11} /> PK
+                    </span>
+                  )}
+                  {col.unique && !pk.has(col.name) && (
+                    <span className="text-[11px] text-dim">unique</span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {table.indexes.length > 0 && (
+        <div>
+          <div className="mb-1.5 flex items-center gap-2 text-[12px] font-semibold">
+            <ListTree size={13} className="text-acc" /> Indexes
+          </div>
+          <ul className="space-y-1 text-[12px]">
+            {table.indexes.map((idx, i) => (
+              <li key={i} className="font-mono text-dim">
+                {idx.unique ? "UNIQUE " : ""}({idx.columns.join(", ")})
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {table.foreignKeys.length > 0 && (
+        <div>
+          <div className="mb-1.5 flex items-center gap-2 text-[12px] font-semibold">
+            <GitBranch size={13} className="text-acc" /> Foreign keys
+          </div>
+          <ul className="space-y-1 text-[12px]">
+            {table.foreignKeys.map((fk, i) => (
+              <li key={i} className="font-mono text-dim">
+                ({fk.columns.join(", ")}) → {fk.refTable} ({fk.refColumns.join(", ")})
+                {fk.onDelete ? ` ON DELETE ${fk.onDelete.toUpperCase()}` : ""}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
   );
 }

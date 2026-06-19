@@ -108,6 +108,40 @@ export function whereSnippet(
   return `${id} ${op} ${sqlLiteral(value)}`;
 }
 
+/**
+ * Build a single-row INSERT from the columns the user filled in. Columns left
+ * out entirely fall back to their database default (so an auto-increment id or
+ * a `created_at DEFAULT now()` just works). Values are quoted string literals
+ * (or NULL) the database coerces to each column's type — the same type-safe
+ * path buildUpdateQuery uses. Throws if there's nothing to insert.
+ */
+export function buildInsertQuery(opts: {
+  dialect: DbDialect;
+  table: string;
+  values: ColumnValue[];
+}): string {
+  if (opts.values.length === 0) throw new Error("No values to insert.");
+  const cols = opts.values.map((v) => quoteIdent(opts.dialect, v.column)).join(", ");
+  const lits = opts.values.map((v) => sqlLiteral(v.value)).join(", ");
+  return `INSERT INTO ${quoteIdent(opts.dialect, opts.table)} (${cols}) VALUES (${lits})`;
+}
+
+/**
+ * Build a single-row DELETE keyed by primary key, so exactly one row is removed.
+ * Throws if there's no key — deleting without one could wipe many rows.
+ */
+export function buildDeleteQuery(opts: {
+  dialect: DbDialect;
+  table: string;
+  where: ColumnValue[];
+}): string {
+  if (opts.where.length === 0) throw new Error("Cannot delete a row without a primary key.");
+  const whereClause = opts.where
+    .map((w) => whereSnippet(opts.dialect, w.column, "=", w.value))
+    .join(" AND ");
+  return `DELETE FROM ${quoteIdent(opts.dialect, opts.table)} WHERE ${whereClause}`;
+}
+
 /** A ready-to-run "find rows where this cell matches" query for SQL users. */
 export function buildFilterQuery(opts: {
   dialect: DbDialect;
