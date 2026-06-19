@@ -17,6 +17,37 @@ export function toCsv(columns: string[], rows: (string | null)[][]): string {
   return body.length > 0 ? `${head}\n${body}` : head;
 }
 
+/** Pretty-print a string if it parses as JSON, else return it unchanged. Powers
+ *  the cell detail viewer's "show formatted JSON" behavior. */
+export function prettyMaybeJson(value: string): { text: string; isJson: boolean } {
+  const t = value.trim();
+  if (t.startsWith("{") || t.startsWith("[")) {
+    try {
+      return { text: JSON.stringify(JSON.parse(t), null, 2), isJson: true };
+    } catch {
+      /* not JSON after all */
+    }
+  }
+  return { text: value, isJson: false };
+}
+
+/** Result rows as a pretty-printed JSON array of objects (Beekeeper-style). */
+export function toJson(columns: string[], rows: (string | null)[][]): string {
+  const objects = rows.map((r) =>
+    Object.fromEntries(columns.map((c, i) => [c, r[i] ?? null])),
+  );
+  return JSON.stringify(objects, null, 2);
+}
+
+/** A single row as a pretty-printed JSON object (for "Copy row as JSON"). */
+export function rowToJson(columns: string[], row: (string | null)[]): string {
+  return JSON.stringify(
+    Object.fromEntries(columns.map((c, i) => [c, row[i] ?? null])),
+    null,
+    2,
+  );
+}
+
 /** A batch of INSERT statements that recreate these rows in `table`. */
 export function toSqlInserts(
   dialect: DbDialect,

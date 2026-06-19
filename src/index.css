@@ -77,6 +77,22 @@ body {
       transform 0.12s ease,
       opacity 0.15s ease;
   }
+
+  /* Numerals in monospace contexts (data grid, SQL line numbers, counts, the
+     health score) line up in fixed-width columns — reads as a precision tool. */
+  pre,
+  code,
+  .font-mono {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* A single, crisp keyboard-focus ring — visible to keyboard users only, so it
+     polishes accessibility without cluttering mouse interaction. */
+  :focus-visible {
+    outline: 2px solid rgb(var(--c-acc) / 0.6);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
 }
 
 /* Never animate node transform — it must track the cursor 1:1 while dragging. */
@@ -96,6 +112,26 @@ body {
     background: rgb(var(--c-panel) / 0.88);
     backdrop-filter: blur(20px) saturate(140%);
     -webkit-backdrop-filter: blur(20px) saturate(140%);
+  }
+
+  /* Lit-from-above: a hairline of light along the top edge gives panels and
+     glass surfaces physical depth, as if catching ambient light. */
+  .lit {
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.06);
+  }
+
+  /* The brand gradient as text — for the wordmark and accent headings. */
+  .text-gradient {
+    background: linear-gradient(120deg, rgb(var(--c-acc)), rgb(var(--c-acc2)));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* A faint engineering dot-grid for empty surfaces and backdrops. */
+  .dot-grid {
+    background-image: radial-gradient(rgb(var(--c-line2) / 0.45) 1px, transparent 1px);
+    background-size: 22px 22px;
   }
 }
 

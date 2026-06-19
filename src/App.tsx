@@ -345,15 +345,15 @@ export function App() {
   return (
     <div className="flex h-full flex-col bg-bg text-ink">
       {/* top bar */}
-      <header className="flex h-12 items-center gap-3 border-b border-line bg-panel px-3">
+      <header className="lit flex h-12 items-center gap-3 border-b border-line bg-panel px-3">
         <div className="flex items-center gap-2">
           <div
-            className="grid h-[22px] w-[22px] place-items-center rounded-md"
-            style={{ background: GRADIENT }}
+            className="lit grid h-[22px] w-[22px] animate-shimmer place-items-center rounded-md shadow-glow-soft"
+            style={{ background: GRADIENT, backgroundSize: "200% 200%" }}
           >
             <Shield size={13} strokeWidth={2.5} color="#ffffff" />
           </div>
-          <span className="text-[13px] font-bold">SchemaGuard</span>
+          <span className="text-gradient text-[13px] font-bold tracking-tight">SchemaGuard</span>
         </div>
 
         <span className="h-5 w-px bg-line" />

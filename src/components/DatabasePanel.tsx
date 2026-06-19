@@ -22,7 +22,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { autoLayout } from "../lib/autoLayout";
 import type { ColumnValue } from "../lib/browseQuery";
@@ -45,7 +45,7 @@ import {
   dbTables,
   isDesktop,
 } from "../lib/db";
-import { toCsv, toSqlInserts } from "../lib/exportData";
+import { prettyMaybeJson, rowToJson, toCsv, toJson, toSqlInserts } from "../lib/exportData";
 import { fetchPrimaryKey, introspectSchema } from "../lib/introspect";
 import { downloadText } from "../lib/projectFile";
 import { useConnections } from "../stores/connections";
@@ -106,6 +106,9 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
   // Recent successfully-run queries from the Query tab (newest first).
   const [history, setHistory] = useState<string[]>([]);
   const [exportOpen, setExportOpen] = useState(false);
+  // The cell whose full value is shown in the detail viewer (Beekeeper-style).
+  const [detail, setDetail] = useState<{ column: string; value: string | null } | null>(null);
+  const queryRef = useRef<HTMLTextAreaElement>(null);
   // phpMyAdmin-style find/sort: filter the table list, and search + sort rows.
   const [tableFilter, setTableFilter] = useState("");
   const [search, setSearch] = useState("");
@@ -375,8 +378,8 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
     }
   };
 
-  // Export the current result grid to a downloaded CSV or SQL file.
-  const exportResult = (format: "csv" | "sql") => {
+  // Export the current result grid to a downloaded CSV, JSON or SQL file.
+  const exportResult = (format: "csv" | "json" | "sql") => {
     setExportOpen(false);
     if (!result || result.columns.length === 0) {
       toast.error("Nothing to export.");
@@ -385,6 +388,8 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
     const base = selected ?? "query";
     if (format === "csv") {
       downloadText(`${base}.csv`, toCsv(result.columns, result.rows), "text/csv");
+    } else if (format === "json") {
+      downloadText(`${base}.json`, toJson(result.columns, result.rows), "application/json");
     } else {
       downloadText(
         `${base}.sql`,
@@ -491,6 +496,14 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
       });
   };
 
+  // Run the highlighted text if the user has a selection, else the whole editor
+  // (Beekeeper "Run selection"). Lets you keep several statements and run one.
+  const runQueryOrSelection = () => {
+    const el = queryRef.current;
+    const sel = el ? el.value.slice(el.selectionStart, el.selectionEnd).trim() : "";
+    runQuery(sel.length > 0 ? sel : query);
+  };
+
   // Drop a generated query into the Query tab and run it — the heart of the
   // right-click "search with SQL" flow.
   const openInQuery = (sql: string) => {
@@ -546,11 +559,18 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
     ];
   };
 
-  // Right-click a record/cell → build a WHERE filter on that value.
-  const cellMenu = (column: string, value: string | null): MenuItem[] => {
+  // Right-click a record/cell → view it, build a WHERE filter, or copy.
+  const cellMenu = (column: string, value: string | null, row: (string | null)[]): MenuItem[] => {
     if (!selected) return [];
     const display = value === null ? "NULL" : value.length > 24 ? `${value.slice(0, 24)}…` : value;
     return [
+      {
+        label: "View full value",
+        icon: <Search size={13} />,
+        onClick: () => {
+          setDetail({ column, value });
+        },
+      },
       {
         label: `Find rows where ${column} = ${display}`,
         icon: <Filter size={13} />,
@@ -586,6 +606,11 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
         label: "Copy value",
         icon: <Copy size={13} />,
         onClick: () => copy(value ?? "NULL", "value"),
+      },
+      {
+        label: "Copy row as JSON",
+        icon: <Copy size={13} />,
+        onClick: () => copy(rowToJson(result?.columns ?? [], row), "row JSON"),
       },
       {
         label: "Copy WHERE clause",
@@ -933,29 +958,23 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                     ))}
                   </select>
                   <span className="ml-auto text-[11px] text-faint">Export result:</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      exportResult("csv");
-                    }}
-                    disabled={!result || result.rows.length === 0}
-                    className="rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] hover:border-line2 disabled:opacity-40"
-                  >
-                    CSV
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      exportResult("sql");
-                    }}
-                    disabled={!result || result.rows.length === 0}
-                    className="rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] hover:border-line2 disabled:opacity-40"
-                  >
-                    SQL
-                  </button>
+                  {(["csv", "json", "sql"] as const).map((fmt) => (
+                    <button
+                      key={fmt}
+                      type="button"
+                      onClick={() => {
+                        exportResult(fmt);
+                      }}
+                      disabled={!result || result.rows.length === 0}
+                      className="rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] uppercase hover:border-line2 disabled:opacity-40"
+                    >
+                      {fmt}
+                    </button>
+                  ))}
                 </div>
                 <div className="flex items-end gap-2">
                   <textarea
+                    ref={queryRef}
                     value={query}
                     onChange={(e) => {
                       setQuery(e.target.value);
@@ -963,18 +982,16 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                     onKeyDown={(e) => {
                       if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
                         e.preventDefault();
-                        runQuery();
+                        runQueryOrSelection();
                       }
                     }}
                     spellCheck={false}
-                    placeholder="SELECT * FROM users;"
+                    placeholder="SELECT * FROM users;   (⌘/Ctrl+Enter runs the selection, or all)"
                     className="h-16 flex-1 resize-none rounded-lg border border-line bg-panel2 p-2 font-mono text-[12px] outline-none focus:border-acc"
                   />
                   <button
                     type="button"
-                    onClick={() => {
-                      runQuery();
-                    }}
+                    onClick={runQueryOrSelection}
                     className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-[12.5px] font-semibold text-white shadow-glow"
                     style={{ background: GRADIENT }}
                   >
@@ -1058,6 +1075,15 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                       <button
                         type="button"
                         onClick={() => {
+                          exportResult("json");
+                        }}
+                        className="block w-full px-3 py-1.5 text-left text-[12px] hover:bg-panel3"
+                      >
+                        JSON
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
                           exportResult("sql");
                         }}
                         className="block w-full px-3 py-1.5 text-left text-[12px] hover:bg-panel3"
@@ -1136,9 +1162,16 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                         pkColumns={pkColumns}
                         onSaveRow={saveRow}
                         onDeleteRow={deleteRow}
-                        onCellMenu={(e, column, value) => {
+                        onCellMenu={(e, column, value, row) => {
                           e.preventDefault();
-                          setMenu({ x: e.clientX, y: e.clientY, items: cellMenu(column, value) });
+                          setMenu({
+                            x: e.clientX,
+                            y: e.clientY,
+                            items: cellMenu(column, value, row),
+                          });
+                        }}
+                        onCellClick={(column, value) => {
+                          setDetail({ column, value });
                         }}
                       />
                     ) : (
@@ -1161,6 +1194,16 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
           }}
         />
       )}
+
+      {detail && (
+        <CellDetail
+          column={detail.column}
+          value={detail.value}
+          onClose={() => {
+            setDetail(null);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -1173,6 +1216,7 @@ function ResultGrid({
   onSaveRow,
   onDeleteRow,
   onCellMenu,
+  onCellClick,
 }: {
   result: QueryResult;
   sort?: { col: string; dir: "asc" | "desc" } | null;
@@ -1180,7 +1224,13 @@ function ResultGrid({
   pkColumns?: string[];
   onSaveRow?: (original: (string | null)[], next: (string | null)[]) => Promise<boolean>;
   onDeleteRow?: (row: (string | null)[]) => Promise<boolean>;
-  onCellMenu?: (e: React.MouseEvent, column: string, value: string | null) => void;
+  onCellMenu?: (
+    e: React.MouseEvent,
+    column: string,
+    value: string | null,
+    row: (string | null)[],
+  ) => void;
+  onCellClick?: (column: string, value: string | null) => void;
 }) {
   const editable = !!onSaveRow && (pkColumns?.length ?? 0) > 0;
   const [editing, setEditing] = useState<number | null>(null);
@@ -1333,14 +1383,22 @@ function ResultGrid({
               {row.map((cell, j) => (
                 <td
                   key={j}
-                  onContextMenu={
-                    onCellMenu && !isEdit
-                      ? (e) => {
-                          onCellMenu(e, result.columns[j] ?? "", cell);
+                  onClick={
+                    onCellClick && !isEdit
+                      ? () => {
+                          onCellClick(result.columns[j] ?? "", cell);
                         }
                       : undefined
                   }
-                  className={`max-w-[360px] border-b border-line/50 px-3 py-1.5 font-mono ${isEdit ? "" : "truncate"}`}
+                  onContextMenu={
+                    onCellMenu && !isEdit
+                      ? (e) => {
+                          onCellMenu(e, result.columns[j] ?? "", cell, row);
+                        }
+                      : undefined
+                  }
+                  title={onCellClick && !isEdit ? "Click to view full value" : undefined}
+                  className={`max-w-[360px] border-b border-line/50 px-3 py-1.5 font-mono ${isEdit ? "" : "cursor-pointer truncate"}`}
                 >
                   {isEdit ? (
                     <CellEditor
@@ -1506,6 +1564,88 @@ function InsertRow({
         >
           Cancel
         </button>
+      </div>
+    </div>
+  );
+}
+
+/** A modal showing a single cell's full value — Beekeeper's row/cell viewer. */
+function CellDetail({
+  column,
+  value,
+  onClose,
+}: {
+  column: string;
+  value: string | null;
+  onClose: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const pretty = value === null ? { text: "NULL", isJson: false } : prettyMaybeJson(value);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-[55] grid animate-fade place-items-center bg-black/60 p-6 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="glass-strong flex max-h-[80vh] w-[640px] max-w-full animate-pop flex-col overflow-hidden rounded-xl border border-line/70 shadow-2xl"
+        onClick={(e) => {
+          e.stopPropagation();
+        }}
+      >
+        <div className="flex flex-none items-center gap-2 border-b border-line px-4 py-2.5">
+          <span className="font-mono text-[12.5px] font-semibold">{column}</span>
+          {pretty.isJson && (
+            <span className="rounded bg-panel3 px-1.5 py-0.5 text-[10px] text-faint">JSON</span>
+          )}
+          {value !== null && (
+            <span className="text-[11px] text-faint">{value.length} chars</span>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              void navigator.clipboard.writeText(value ?? "").then(() => {
+                setCopied(true);
+                setTimeout(() => {
+                  setCopied(false);
+                }, 1200);
+              });
+            }}
+            className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] hover:border-line2"
+          >
+            {copied ? <Check size={12} color="#3ecf8e" /> : <Copy size={12} />}
+            {copied ? "Copied" : "Copy"}
+          </button>
+          <button
+            type="button"
+            aria-label="Close"
+            onClick={onClose}
+            className="grid place-items-center text-faint hover:text-ink"
+          >
+            <X size={15} />
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-auto p-4">
+          {value === null ? (
+            <span className="italic text-faint">NULL</span>
+          ) : value.length === 0 ? (
+            <span className="italic text-faint">(empty string)</span>
+          ) : (
+            <pre className="whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed text-ink">
+              {pretty.text}
+            </pre>
+          )}
+        </div>
       </div>
     </div>
   );

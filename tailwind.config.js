@@ -26,11 +26,22 @@ module.exports = {
         crit: token("--c-crit"),
       },
       fontFamily: {
+        sans: [
+          "-apple-system",
+          "BlinkMacSystemFont",
+          "Segoe UI",
+          "Roboto",
+          "Helvetica",
+          "Arial",
+          "sans-serif",
+        ],
         mono: ["ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
       },
       boxShadow: {
         glow: "0 0 0 1px rgba(255,63,164,0.5), 0 8px 30px rgba(255,63,164,0.28)",
         "glow-soft": "0 6px 24px rgba(166,75,255,0.25)",
+        // Soft, layered elevation for cards and floating panels.
+        card: "0 1px 2px rgba(0,0,0,0.3), 0 12px 32px rgba(0,0,0,0.36)",
       },
       keyframes: {
         fade: {
@@ -49,12 +60,18 @@ module.exports = {
           from: { opacity: "0", transform: "translateY(6px)" },
           to: { opacity: "1", transform: "translateY(0)" },
         },
+        // A slow light-sweep across the gradient brand mark.
+        shimmer: {
+          "0%, 100%": { backgroundPosition: "0% 50%" },
+          "50%": { backgroundPosition: "100% 50%" },
+        },
       },
       animation: {
         fade: "fade 0.16s ease-out",
         pop: "pop 0.2s cubic-bezier(0.2, 0.8, 0.2, 1)",
         slideright: "slideright 0.22s cubic-bezier(0.2, 0.8, 0.2, 1)",
         slideup: "slideup 0.18s ease-out",
+        shimmer: "shimmer 6s ease-in-out infinite",
       },
     },
   },
