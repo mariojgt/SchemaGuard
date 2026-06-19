@@ -1,0 +1,214 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---- Theme tokens (channels are "R G B" so Tailwind alpha modifiers work) ---- */
+:root {
+  color-scheme: dark;
+  --c-bg: 11 7 16;
+  --c-panel: 20 14 28;
+  --c-panel2: 27 20 40;
+  --c-panel3: 36 26 53;
+  --c-node: 21 15 32;
+  --c-line: 44 34 64;
+  --c-line2: 58 45 84;
+  --c-ink: 244 238 251;
+  --c-dim: 169 159 192;
+  --c-faint: 109 99 133;
+  --c-acc: 255 63 164;
+  --c-acc2: 166 75 255;
+  --c-low: 62 207 142;
+  --c-med: 246 196 83;
+  --c-high: 255 138 91;
+  --c-crit: 255 77 109;
+  --glow-a: 255 63 164;
+}
+
+.light {
+  color-scheme: light;
+  --c-bg: 247 245 251;
+  --c-panel: 255 255 255;
+  --c-panel2: 245 242 251;
+  --c-panel3: 236 232 245;
+  --c-node: 255 255 255;
+  --c-line: 226 220 238;
+  --c-line2: 205 196 224;
+  --c-ink: 26 20 38;
+  --c-dim: 96 88 120;
+  --c-faint: 142 134 164;
+  --c-acc: 214 16 130;
+  --c-acc2: 124 60 230;
+  --c-low: 22 163 110;
+  --c-med: 176 124 12;
+  --c-high: 201 86 31;
+  --c-crit: 209 41 75;
+  --glow-a: 214 16 130;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background:
+    radial-gradient(900px 520px at 82% -12%, rgb(var(--c-acc) / 0.1), transparent 60%),
+    radial-gradient(760px 520px at -5% 108%, rgb(var(--c-acc2) / 0.08), transparent 60%),
+    rgb(var(--c-bg));
+  background-attachment: fixed;
+  color: rgb(var(--c-ink));
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+@layer base {
+  button,
+  a,
+  select,
+  input,
+  textarea {
+    transition:
+      background-color 0.15s ease,
+      border-color 0.15s ease,
+      color 0.15s ease,
+      box-shadow 0.18s ease,
+      transform 0.12s ease,
+      opacity 0.15s ease;
+  }
+}
+
+/* Never animate node transform — it must track the cursor 1:1 while dragging. */
+.react-flow__node {
+  transition:
+    box-shadow 0.18s ease,
+    border-color 0.15s ease;
+}
+
+@layer utilities {
+  .glass {
+    background: rgb(var(--c-panel) / 0.72);
+    backdrop-filter: blur(16px) saturate(135%);
+    -webkit-backdrop-filter: blur(16px) saturate(135%);
+  }
+  .glass-strong {
+    background: rgb(var(--c-panel) / 0.88);
+    backdrop-filter: blur(20px) saturate(140%);
+    -webkit-backdrop-filter: blur(20px) saturate(140%);
+  }
+}
+
+/* Slim, themed scrollbars. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--c-line));
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--c-line2));
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* React Flow theming */
+.react-flow__controls {
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.react-flow__controls-button {
+  background: rgb(var(--c-panel2));
+  border-bottom: 1px solid rgb(var(--c-line));
+  color: rgb(var(--c-dim));
+  fill: rgb(var(--c-dim));
+}
+.react-flow__controls-button:hover {
+  background: rgb(var(--c-panel3));
+}
+.react-flow__minimap {
+  background: rgb(var(--c-panel) / 0.72) !important;
+  backdrop-filter: blur(12px);
+  border: 1px solid rgb(var(--c-line));
+  border-radius: 10px;
+}
+.react-flow__attribution {
+  background: transparent;
+  color: rgb(var(--c-faint));
+  font-size: 10px;
+}
+.react-flow__edge-path {
+  stroke: rgb(var(--c-acc2));
+  stroke-width: 1.5;
+}
+.react-flow__edge.selected .react-flow__edge-path,
+.react-flow__edge:hover .react-flow__edge-path {
+  stroke: rgb(var(--c-acc));
+}
+.react-flow__edge-text {
+  fill: rgb(var(--c-dim));
+  font-size: 10px;
+}
+.react-flow__edge-textbg {
+  fill: rgb(var(--c-panel));
+}
+
+/* Dataflow view: a selected model's links glow + flow like energy cables. */
+.react-flow__edge.df-energy .react-flow__edge-path {
+  filter: drop-shadow(0 0 5px currentColor) drop-shadow(0 0 2px currentColor);
+}
+.react-flow__edge.df-dim .react-flow__edge-path {
+  opacity: 0.1;
+}
+.react-flow__edge.df-dim .react-flow__edge-text,
+.react-flow__edge.df-dim .react-flow__edge-textbg {
+  opacity: 0;
+}
+
+/* Connection handles — easy to grab and drop. */
+.react-flow__handle {
+  z-index: 3;
+  cursor: crosshair;
+}
+/* Generous invisible hit area around each handle dot. */
+.react-flow__handle::after {
+  content: "";
+  position: absolute;
+  inset: -9px;
+  border-radius: 9999px;
+}
+.react-flow__node:hover .react-flow__handle {
+  box-shadow: 0 0 0 3px rgb(var(--c-acc) / 0.18);
+}
+.react-flow__handle:hover {
+  box-shadow: 0 0 0 4px rgb(var(--c-acc) / 0.3);
+}
+/* While dragging a connection, light up valid drop targets strongly. */
+.react-flow__handle.connectingto,
+.react-flow__handle.valid,
+.react-flow__handle-valid,
+.react-flow__handle-connecting {
+  box-shadow: 0 0 0 6px rgb(var(--c-acc) / 0.4) !important;
+}
+.react-flow__connection-path,
+.react-flow__connectionline path {
+  stroke: rgb(var(--c-acc));
+  stroke-width: 2.5;
+  stroke-dasharray: 6 4;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}

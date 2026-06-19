@@ -1,0 +1,14 @@
+node_modules
+dist
+*.log
+*.tsbuildinfo
+.DS_Store
+
+# Tauri / Rust
+src-tauri/target
+src-tauri/gen
+
+# editor
+.vscode/*
+!.vscode/extensions.json
+.idea
