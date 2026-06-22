@@ -5,6 +5,15 @@ export { dialectFor } from "./dialects/registry";
 export { sqlite } from "./dialects/sqlite";
 export type { EmitOptions } from "./emit/ddl";
 export { emitDdl } from "./emit/ddl";
+export type {
+  ChangeSeverity,
+  ColumnDiff,
+  DiffSummary,
+  FieldChange,
+  SchemaDiff,
+  TableDiff,
+} from "./ir/diff";
+export { diffSchemas, typeLabel } from "./ir/diff";
 export type { IndexFinding, IndexLevel } from "./ir/indexing";
 export { analyzeIndexing, explainIndexing } from "./ir/indexing";
 export { sampleSchema } from "./ir/sample";

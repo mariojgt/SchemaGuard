@@ -15,6 +15,14 @@ interface UiState {
   mode: AppMode;
   setMode: (mode: AppMode) => void;
 
+  /**
+   * Whether the Settings dialog is open. Lifted here (rather than local to
+   * App) so any component — e.g. the Copilot panel prompting for a missing API
+   * key — can open it directly.
+   */
+  settingsOpen: boolean;
+  setSettingsOpen: (open: boolean) => void;
+
   /** The query the assistant most recently wrote, shown in the floating panel. */
   query: LiveQuery | null;
   setQuery: (query: LiveQuery | null) => void;
@@ -37,6 +45,9 @@ interface UiState {
 export const useUi = create<UiState>((set) => ({
   mode: "designer",
   setMode: (mode) => set({ mode }),
+
+  settingsOpen: false,
+  setSettingsOpen: (open) => set({ settingsOpen: open }),
 
   query: null,
   setQuery: (query) => set({ query }),

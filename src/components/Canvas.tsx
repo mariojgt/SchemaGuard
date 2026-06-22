@@ -22,6 +22,7 @@ import { exportDiagram } from "../lib/exportImage";
 import { RELATION_STYLE } from "../lib/relationStyle";
 import { useSchemaStore } from "../stores/schema";
 import { useSettings } from "../stores/settings";
+import { toast } from "../stores/toasts";
 import type { TableNodeData } from "./TableNode";
 import { TableNode } from "./TableNode";
 
@@ -72,7 +73,7 @@ function CanvasToolbar() {
       background: theme === "light" ? FLOW_BG.light : FLOW_BG.dark,
       fileName: projectName,
     }).then((ok) => {
-      if (!ok) alert("Nothing to export — add or import some tables first.");
+      if (!ok) toast.info("Nothing to export — add or import some tables first.");
     });
   };
 

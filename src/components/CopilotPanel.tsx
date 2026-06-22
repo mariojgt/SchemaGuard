@@ -6,6 +6,8 @@ import { generateSchemaSql, MODEL_OPTIONS, modelOption, PROVIDER_LABELS } from "
 import { gridLayout } from "../lib/layout";
 import { useSchemaStore } from "../stores/schema";
 import { useSettings } from "../stores/settings";
+import { toast } from "../stores/toasts";
+import { useUi } from "../stores/ui";
 
 interface Msg {
   role: "user" | "assistant";
@@ -35,7 +37,8 @@ export function CopilotPanel() {
   const run = (prompt: string) => {
     if (prompt.trim().length === 0 || busy) return;
     if (apiKey.trim().length === 0) {
-      alert(`Add your ${PROVIDER_LABELS[option.provider]} API key in Settings to use this model.`);
+      toast.info(`Add your ${PROVIDER_LABELS[option.provider]} API key to use this model.`);
+      useUi.getState().setSettingsOpen(true);
       return;
     }
     setInput("");

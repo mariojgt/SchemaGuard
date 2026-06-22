@@ -31,6 +31,7 @@ import { Canvas } from "./components/Canvas";
 import { CatalogDialog } from "./components/CatalogDialog";
 import type { Command } from "./components/CommandPalette";
 import { CommandPalette } from "./components/CommandPalette";
+import { ConfirmDialog } from "./components/ConfirmDialog";
 import { DatabasePanel } from "./components/DatabasePanel";
 import { DataflowView } from "./components/DataflowView";
 import { ImportDialog } from "./components/ImportDialog";
@@ -50,6 +51,7 @@ import { downloadText, parseProject, pickTextFile, serializeProject } from "./li
 import { useRecents } from "./stores/recents";
 import { useSchemaStore } from "./stores/schema";
 import { useSettings } from "./stores/settings";
+import { toast } from "./stores/toasts";
 import { useUi } from "./stores/ui";
 
 const GRADIENT = "linear-gradient(135deg,#ff3fa4,#a64bff)";
@@ -85,7 +87,6 @@ export function App() {
   const [importMode, setImportMode] = useState<"laravel" | "sql">("laravel");
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [catalogOpen, setCatalogOpen] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [recentsOpen, setRecentsOpen] = useState(false);
   const [smellsOpen, setSmellsOpen] = useState(false);
   const [indexingOpen, setIndexingOpen] = useState(false);
@@ -94,6 +95,8 @@ export function App() {
   const [leftWidth, setLeftWidth] = useState(460);
   const mode = useUi((s) => s.mode);
   const setMode = useUi((s) => s.setMode);
+  const settingsOpen = useUi((s) => s.settingsOpen);
+  const setSettingsOpen = useUi((s) => s.setSettingsOpen);
 
   const startResize = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -166,7 +169,7 @@ export function App() {
         const project = parseProject(text);
         loadFullProject(project);
       } catch (err) {
-        alert(`Couldn't open project: ${err instanceof Error ? err.message : String(err)}`);
+        toast.error(`Couldn't open project: ${err instanceof Error ? err.message : String(err)}`);
       }
     });
   };
@@ -704,48 +707,18 @@ export function App() {
       )}
 
       {newConfirmOpen && (
-        <div
-          className="fixed inset-0 z-50 grid animate-fade place-items-center bg-black/60 p-6 backdrop-blur-sm"
-          onClick={() => {
+        <ConfirmDialog
+          title="Start a new project?"
+          confirmLabel="Start new"
+          message="This clears the current diagram, migrations and models. Your current project stays in Recent projects, and you can undo with ⌘Z."
+          onCancel={() => {
             setNewConfirmOpen(false);
           }}
-        >
-          <div
-            className="glass-strong w-[400px] max-w-full animate-pop rounded-xl border border-line/70 p-5 shadow-2xl"
-            onClick={(e) => {
-              e.stopPropagation();
-            }}
-          >
-            <div className="text-[14px] font-bold">Start a new project?</div>
-            <p className="mt-1.5 text-[12.5px] text-dim">
-              This clears the current diagram, migrations and models. Your current project stays in
-              Recent projects, and you can undo with ⌘Z.
-            </p>
-            <div className="mt-4 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setNewConfirmOpen(false);
-                }}
-                className="rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12.5px] hover:border-line2"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                aria-label="Start new"
-                onClick={() => {
-                  newProject();
-                  setNewConfirmOpen(false);
-                }}
-                className="rounded-lg px-3 py-1.5 text-[12.5px] font-semibold text-white"
-                style={{ background: GRADIENT }}
-              >
-                Start new
-              </button>
-            </div>
-          </div>
-        </div>
+          onConfirm={() => {
+            newProject();
+            setNewConfirmOpen(false);
+          }}
+        />
       )}
 
       {/* floating AI assistant — available in every mode, sees the open scene */}

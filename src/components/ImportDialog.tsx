@@ -98,7 +98,7 @@ export function ImportDialog({
       try {
         const { schema, warnings } = mode === "sql" ? parseSql(source) : parseLaravel(source);
         if (schema.tables.length === 0) {
-          alert(
+          toast.error(
             mode === "sql"
               ? "No tables found. Paste SQL containing CREATE TABLE statements."
               : "No tables found. Paste Laravel migration(s) that contain Schema::create(...).",

@@ -11,6 +11,7 @@ import {
   FileText,
   Filter,
   GitBranch,
+  GitCompare,
   Hash,
   KeyRound,
   ListTree,
@@ -67,6 +68,7 @@ import { toast } from "../stores/toasts";
 import { useUi } from "../stores/ui";
 import type { MenuItem } from "./ContextMenu";
 import { ContextMenu } from "./ContextMenu";
+import { DiffDialog } from "./DiffDialog";
 import { SchemaDiagram } from "./SchemaDiagram";
 
 const GRADIENT = "linear-gradient(135deg,#ff3fa4,#a64bff)";
@@ -151,6 +153,11 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
   const [diagramSchema, setDiagramSchema] = useState<Schema | null>(null);
   const [diagramLoading, setDiagramLoading] = useState(false);
   const [diagramError, setDiagramError] = useState<string | null>(null);
+
+  // "Guard" loop: diff the canvas design against the live database.
+  const designSchema = useSchemaStore((s) => s.schema);
+  const [compareOpen, setCompareOpen] = useState(false);
+  const [comparing, setComparing] = useState(false);
 
   const [result, setResult] = useState<QueryResult | null>(null);
   const [resultError, setResultError] = useState<string | null>(null);
@@ -617,6 +624,32 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
       })
       .finally(() => {
         setImporting(false);
+      });
+  };
+
+  // Introspect the live DB (reusing the cached schema if present) and open the
+  // diff against the current canvas design.
+  const compareWithDesign = () => {
+    if (!connId || comparing) return;
+    if (designSchema.tables.length === 0) {
+      toast.info("Your design canvas is empty — build or import a schema in Designer first.");
+      return;
+    }
+    if (diagramSchema) {
+      setCompareOpen(true);
+      return;
+    }
+    setComparing(true);
+    introspectSchema(connId, connDialect, connName)
+      .then((s) => {
+        setDiagramSchema(s);
+        setCompareOpen(true);
+      })
+      .catch((e: unknown) => {
+        toast.error(`Couldn't read the schema: ${e instanceof Error ? e.message : String(e)}`);
+      })
+      .finally(() => {
+        setComparing(false);
       });
   };
 
@@ -1098,6 +1131,16 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
         </button>
         <button
           type="button"
+          onClick={compareWithDesign}
+          disabled={comparing}
+          title="Diff your canvas design against this live database"
+          className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12px] hover:border-acc/50 hover:text-acc disabled:opacity-40"
+        >
+          <GitCompare size={14} />
+          {comparing ? "Comparing…" : "Compare with design"}
+        </button>
+        <button
+          type="button"
           onClick={importToDiagram}
           disabled={importing}
           title="Reverse-engineer this database into a diagram"
@@ -1549,6 +1592,17 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
             if (!creatingDb) setCreateDbOpen(false);
           }}
           onCreate={createDatabase}
+        />
+      )}
+
+      {compareOpen && diagramSchema && (
+        <DiffDialog
+          before={diagramSchema}
+          after={designSchema}
+          liveName={connName}
+          onClose={() => {
+            setCompareOpen(false);
+          }}
         />
       )}
     </div>

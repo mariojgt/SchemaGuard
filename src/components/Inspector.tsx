@@ -3,6 +3,7 @@ import { useState } from "react";
 
 import { presetIdForType, TYPE_PRESETS } from "../lib/typePresets";
 import { useSchemaStore } from "../stores/schema";
+import { ConfirmDialog } from "./ConfirmDialog";
 
 export function Inspector() {
   const schema = useSchemaStore((s) => s.schema);
@@ -17,6 +18,8 @@ export function Inspector() {
   const deleteForeignKey = useSchemaStore((s) => s.deleteForeignKey);
   const addTable = useSchemaStore((s) => s.addTable);
   const selectTable = useSchemaStore((s) => s.selectTable);
+
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const table = selectedTable ? schema.tables.find((t) => t.name === selectedTable) : undefined;
 
@@ -57,7 +60,7 @@ export function Inspector() {
           type="button"
           title="Delete table"
           onClick={() => {
-            deleteTable(table.name);
+            setConfirmDelete(true);
           }}
           className="grid place-items-center rounded-md border border-line px-2 py-1 text-high hover:border-high/50"
         >
@@ -211,6 +214,28 @@ export function Inspector() {
           )}
         </div>
       </div>
+
+      {confirmDelete && (
+        <ConfirmDialog
+          title="Delete this table?"
+          tone="danger"
+          confirmLabel="Delete table"
+          message={
+            <>
+              <span className="font-semibold text-ink">{table.name}</span> and its{" "}
+              {table.columns.length} column{table.columns.length === 1 ? "" : "s"} will be removed
+              from the diagram. You can undo with ⌘Z.
+            </>
+          }
+          onCancel={() => {
+            setConfirmDelete(false);
+          }}
+          onConfirm={() => {
+            deleteTable(table.name);
+            setConfirmDelete(false);
+          }}
+        />
+      )}
     </div>
   );
 }
