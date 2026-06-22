@@ -44,6 +44,7 @@ import {
 import type { ConnInfo, DbDialect, QueryResult } from "../lib/db";
 import {
   dbConnect,
+  dbCreateDatabase,
   dbDatabases,
   dbDisconnect,
   dbDropTables,
@@ -116,6 +117,9 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
   // to a different database without re-prompting — powers the DB switcher.
   const [activeInfo, setActiveInfo] = useState<ConnInfo | null>(null);
   const [databases, setDatabases] = useState<string[]>([]);
+  // "New database" dialog + in-flight flag (create on the connected server).
+  const [createDbOpen, setCreateDbOpen] = useState(false);
+  const [creatingDb, setCreatingDb] = useState(false);
   const [importing, setImporting] = useState(false);
   const [tables, setTables] = useState<string[]>([]);
   // Tables checked for a bulk drop, plus the confirm-dialog + in-flight flags.
@@ -278,6 +282,28 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
       })
       .finally(() => {
         setConnecting(false);
+      });
+  };
+
+  // Create a new database on the connected server, then switch into it so it's
+  // ready to use. switchDatabase reconnects and refreshes the database list.
+  const createDatabase = (name: string) => {
+    const trimmed = name.trim();
+    if (!connId || !activeInfo || !trimmed || creatingDb) return;
+    setCreatingDb(true);
+    dbCreateDatabase(connId, trimmed)
+      .then(() => {
+        toast.success(`Created database “${trimmed}”.`);
+        setCreateDbOpen(false);
+        switchDatabase(trimmed);
+      })
+      .catch((e: unknown) => {
+        toast.error(
+          `Couldn't create “${trimmed}”: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      })
+      .finally(() => {
+        setCreatingDb(false);
       });
   };
 
@@ -1015,29 +1041,43 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
         <PlugZap size={15} className="text-acc" />
         <span className="text-[12.5px] font-semibold">{connName}</span>
         {activeInfo && (
-          <label
-            className="ml-1 flex items-center gap-1 text-[11.5px] text-dim"
-            title="Switch database"
-          >
-            <Database size={13} className="text-faint" />
-            <select
-              value={activeInfo.database}
-              disabled={connecting}
-              onChange={(e) => {
-                switchDatabase(e.target.value);
-              }}
-              className="max-w-[180px] rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] text-ink outline-none focus:border-acc disabled:opacity-50"
+          <>
+            <label
+              className="ml-1 flex items-center gap-1 text-[11.5px] text-dim"
+              title="Switch database"
             >
-              {(databases.includes(activeInfo.database)
-                ? databases
-                : [activeInfo.database, ...databases]
-              ).map((d) => (
-                <option key={d} value={d}>
-                  {d}
-                </option>
-              ))}
-            </select>
-          </label>
+              <Database size={13} className="text-faint" />
+              <select
+                value={activeInfo.database}
+                disabled={connecting}
+                onChange={(e) => {
+                  switchDatabase(e.target.value);
+                }}
+                className="max-w-[180px] rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] text-ink outline-none focus:border-acc disabled:opacity-50"
+              >
+                {(databases.includes(activeInfo.database)
+                  ? databases
+                  : [activeInfo.database, ...databases]
+                ).map((d) => (
+                  <option key={d} value={d}>
+                    {d}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              onClick={() => {
+                setCreateDbOpen(true);
+              }}
+              disabled={connecting}
+              title="Create a new database on this server"
+              className="inline-flex items-center gap-1 rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] text-dim hover:border-acc/50 hover:text-acc disabled:opacity-50"
+            >
+              <Plus size={13} />
+              New DB
+            </button>
+          </>
         )}
         <div className="ml-3 flex gap-0.5 rounded-lg border border-line bg-panel2 p-0.5">
           <Tab label="Data" active={view === "data"} onClick={() => setView("data")} />
@@ -1489,12 +1529,26 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
         <ImportSqlDialog
           connId={connId}
           database={activeInfo.database}
+          dialect={connDialect}
+          tableCount={tables.length}
           onClose={() => {
             setImportSqlOpen(false);
           }}
           onDone={() => {
             refreshTables(true);
           }}
+        />
+      )}
+
+      {createDbOpen && activeInfo && (
+        <CreateDatabaseDialog
+          dialect={connDialect}
+          creating={creatingDb}
+          existing={databases}
+          onCancel={() => {
+            if (!creatingDb) setCreateDbOpen(false);
+          }}
+          onCreate={createDatabase}
         />
       )}
     </div>
@@ -1506,6 +1560,19 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
 const IMPORT_CHUNK = 4 * 1024 * 1024;
 const IMPORT_BATCH = 400;
 
+// Per-dialect session statements to suspend / restore foreign-key enforcement
+// for the duration of an import (mysqldump-style), so dumps restore regardless
+// of statement order. Postgres uses session_replication_role (needs elevated
+// rights — applied best-effort).
+const FK_OFF: Record<DbDialect, string> = {
+  mysql: "SET FOREIGN_KEY_CHECKS=0",
+  postgres: "SET session_replication_role = replica",
+};
+const FK_ON: Record<DbDialect, string> = {
+  mysql: "SET FOREIGN_KEY_CHECKS=1",
+  postgres: "SET session_replication_role = origin",
+};
+
 /**
  * phpMyAdmin-style import: pick a .sql file and run it against the database.
  * The file is streamed in chunks so dumps of any size import without loading
@@ -1514,17 +1581,28 @@ const IMPORT_BATCH = 400;
 function ImportSqlDialog({
   connId,
   database,
+  dialect,
+  tableCount,
   onClose,
   onDone,
 }: {
   connId: string;
   database: string;
+  dialect: DbDialect;
+  tableCount: number;
   onClose: () => void;
   onDone: () => void;
 }) {
   const [file, setFile] = useState<File | null>(null);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
+  // Opt-in: wipe the database before importing so a full dump restores cleanly
+  // (avoids "table already exists" / 1050 on re-import).
+  const [emptyFirst, setEmptyFirst] = useState(false);
+  const [emptying, setEmptying] = useState(false);
+  // On by default: disable FK checks for the import session so a full dump
+  // restores regardless of table/row order (avoids 1452). Re-enabled at the end.
+  const [disableFk, setDisableFk] = useState(true);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const run = async () => {
@@ -1533,7 +1611,22 @@ function ImportSqlDialog({
     setProgress(0);
     let importId: string | null = null;
     try {
+      // Drop every existing table first when requested. FK checks are disabled
+      // so tables referenced by others still drop; this runs before the import
+      // session opens, and DDL auto-commits, so the import sees a clean schema.
+      if (emptyFirst) {
+        setEmptying(true);
+        const existing = await dbTables(connId);
+        if (existing.length > 0) await dbDropTables(connId, existing, true);
+        setEmptying(false);
+      }
       importId = await dbImportBegin(connId);
+      // Turn off FK enforcement for this one import connection so a full dump
+      // restores regardless of statement/row order. Best-effort: on Postgres
+      // this needs elevated rights, so a failure just leaves checks on.
+      if (disableFk) {
+        await dbImportExec(importId, [FK_OFF[dialect]]).catch(() => undefined);
+      }
       let offset = 0;
       let buffer = "";
       let totalRows = 0;
@@ -1566,7 +1659,14 @@ function ImportSqlDialog({
     } catch (e: unknown) {
       toast.error(`Import failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
-      if (importId) await dbImportFinish(importId).catch(() => undefined);
+      if (importId) {
+        // Restore FK enforcement before the connection returns to the pool so
+        // the disabled setting never leaks into later queries. (Re-enabling
+        // doesn't re-validate the rows just imported, so it can't error.)
+        if (disableFk) await dbImportExec(importId, [FK_ON[dialect]]).catch(() => undefined);
+        await dbImportFinish(importId).catch(() => undefined);
+      }
+      setEmptying(false);
       setRunning(false);
     }
   };
@@ -1648,10 +1748,55 @@ function ImportSqlDialog({
             </span>
           </div>
 
+          <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12px]">
+            <input
+              type="checkbox"
+              checked={emptyFirst}
+              disabled={running}
+              onChange={(e) => {
+                setEmptyFirst(e.target.checked);
+              }}
+              className="mt-0.5 h-3.5 w-3.5 accent-[#a64bff]"
+            />
+            <span>
+              <span className="inline-flex items-center gap-1 font-semibold text-ink">
+                <ShieldOff size={12} className="text-high" />
+                Drop existing tables first
+              </span>
+              <span className="mt-0.5 block text-[11px] text-faint">
+                {tableCount > 0
+                  ? `Permanently deletes all ${String(tableCount)} table${tableCount === 1 ? "" : "s"} in ${database} before importing, so a full dump restores without "already exists" errors.`
+                  : `${database} is already empty — the dump will import as-is.`}
+              </span>
+            </span>
+          </label>
+
+          <label className="mt-2 flex cursor-pointer items-start gap-2 text-[12px]">
+            <input
+              type="checkbox"
+              checked={disableFk}
+              disabled={running}
+              onChange={(e) => {
+                setDisableFk(e.target.checked);
+              }}
+              className="mt-0.5 h-3.5 w-3.5 accent-[#a64bff]"
+            />
+            <span>
+              <span className="inline-flex items-center gap-1 font-semibold text-ink">
+                <ShieldOff size={12} className="text-med" />
+                Disable foreign-key checks during import
+              </span>
+              <span className="mt-0.5 block text-[11px] text-faint">
+                Recommended for full dumps — lets tables and rows load in any order without
+                constraint errors (1452). Re-enabled automatically when the import finishes.
+              </span>
+            </span>
+          </label>
+
           {running && (
             <div className="mt-3">
               <div className="mb-1 flex items-center justify-between text-[11px] text-dim">
-                <span>Streaming &amp; importing…</span>
+                <span>{emptying ? "Emptying database…" : "Streaming & importing…"}</span>
                 <span className="font-mono tabular-nums">{progress}%</span>
               </div>
               <div className="h-1.5 overflow-hidden rounded-full bg-panel">
@@ -1683,7 +1828,114 @@ function ImportSqlDialog({
             style={{ background: GRADIENT }}
           >
             {running ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
-            {running ? "Importing…" : "Import"}
+            {emptying ? "Emptying…" : running ? "Importing…" : "Import"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Name and create a new database on the connected server, then switch to it. */
+function CreateDatabaseDialog({
+  dialect,
+  creating,
+  existing,
+  onCancel,
+  onCreate,
+}: {
+  dialect: DbDialect;
+  creating: boolean;
+  existing: string[];
+  onCancel: () => void;
+  onCreate: (name: string) => void;
+}) {
+  const [name, setName] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+  const trimmed = name.trim();
+  const duplicate = existing.some((d) => d.toLowerCase() === trimmed.toLowerCase());
+  const canCreate = trimmed.length > 0 && !duplicate && !creating;
+  const submit = () => {
+    if (canCreate) onCreate(trimmed);
+  };
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  return (
+    <div
+      className="fixed inset-0 z-[55] grid animate-fade place-items-center bg-black/60 p-6 backdrop-blur-sm"
+      onClick={onCancel}
+    >
+      <div
+        className="glass-strong flex w-[440px] max-w-full animate-pop flex-col overflow-hidden rounded-xl border border-line/70 shadow-2xl"
+        onClick={(e) => {
+          e.stopPropagation();
+        }}
+      >
+        <div className="flex flex-none items-center gap-2 border-b border-line px-4 py-3">
+          <span className="grid h-[18px] w-[18px] place-items-center rounded bg-acc/20 text-acc">
+            <Database size={12} />
+          </span>
+          <span className="text-[14px] font-bold">Create database</span>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={creating}
+            className="ml-auto grid place-items-center text-faint hover:text-ink disabled:opacity-40"
+          >
+            <X size={15} />
+          </button>
+        </div>
+
+        <div className="p-4">
+          <label className="mb-1.5 block text-[11px] font-bold uppercase tracking-wider text-faint">
+            Name
+          </label>
+          <input
+            ref={inputRef}
+            value={name}
+            disabled={creating}
+            placeholder="my_new_database"
+            onChange={(e) => {
+              setName(e.target.value);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") submit();
+            }}
+            className="w-full rounded-lg border border-line bg-panel2 px-2.5 py-2 font-mono text-[12.5px] text-ink outline-none focus:border-acc disabled:opacity-50"
+          />
+          {duplicate ? (
+            <p className="mt-2 text-[11px] text-med">
+              A database named “{trimmed}” already exists.
+            </p>
+          ) : (
+            <p className="mt-2 text-[11px] text-faint">
+              Creates an empty database on this {dialect === "mysql" ? "MySQL" : "PostgreSQL"}{" "}
+              server and switches to it.
+            </p>
+          )}
+        </div>
+
+        <div className="flex flex-none items-center justify-end gap-2 border-t border-line px-4 py-3">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={creating}
+            className="rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12.5px] disabled:opacity-40"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={!canCreate}
+            className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12.5px] font-semibold text-white shadow-glow disabled:opacity-40"
+            style={{ background: GRADIENT }}
+          >
+            <Plus size={13} />
+            {creating ? "Creating…" : "Create"}
           </button>
         </div>
       </div>
