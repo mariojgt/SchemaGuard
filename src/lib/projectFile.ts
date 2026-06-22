@@ -153,18 +153,39 @@ export function pickTextFiles(accept: string): Promise<string[]> {
     input.type = "file";
     input.accept = accept;
     input.multiple = true;
+
+    // Resolve at most once. Cancelling the OS dialog fires no `change` event, so
+    // without this a caller showing a "reading…" spinner would hang forever.
+    let settled = false;
+    const finish = (texts: string[]): void => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener("focus", onRefocus);
+      resolve(texts);
+    };
+    const onRefocus = (): void => {
+      setTimeout(() => {
+        if (!input.files || input.files.length === 0) finish([]);
+      }, 400);
+    };
+
+    input.oncancel = () => {
+      finish([]);
+    };
     input.onchange = () => {
       const files = Array.from(input.files ?? []);
       if (files.length === 0) {
-        resolve([]);
+        finish([]);
         return;
       }
       void Promise.all(files.map((f) => f.text()))
-        .then(resolve)
+        .then(finish)
         .catch(() => {
-          resolve([]);
+          finish([]);
         });
     };
+
+    window.addEventListener("focus", onRefocus, { once: true });
     input.click();
   });
 }

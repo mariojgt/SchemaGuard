@@ -1,5 +1,6 @@
 import type { CanonicalType, Schema, Table } from "@schemaguard/core";
 import {
+  AlertTriangle,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -7,19 +8,24 @@ import {
   Database,
   Download,
   Equal,
+  FileText,
   Filter,
   GitBranch,
   Hash,
   KeyRound,
   ListTree,
+  Loader2,
   Pencil,
   Play,
   Plug,
   PlugZap,
   Plus,
+  RefreshCw,
   Search,
+  ShieldOff,
   Table2,
   Trash2,
+  Upload,
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -38,8 +44,13 @@ import {
 import type { ConnInfo, DbDialect, QueryResult } from "../lib/db";
 import {
   dbConnect,
+  dbDatabases,
   dbDisconnect,
+  dbDropTables,
   dbExecute,
+  dbImportBegin,
+  dbImportExec,
+  dbImportFinish,
   dbQuery,
   dbTableData,
   dbTables,
@@ -48,6 +59,7 @@ import {
 import { prettyMaybeJson, rowToJson, toCsv, toJson, toSqlInserts } from "../lib/exportData";
 import { fetchPrimaryKey, introspectSchema } from "../lib/introspect";
 import { downloadText } from "../lib/projectFile";
+import { extractStatements, flushStatements } from "../lib/sqlSplit";
 import { useConnections } from "../stores/connections";
 import { useSchemaStore } from "../stores/schema";
 import { toast } from "../stores/toasts";
@@ -58,6 +70,10 @@ import { SchemaDiagram } from "./SchemaDiagram";
 
 const GRADIENT = "linear-gradient(135deg,#ff3fa4,#a64bff)";
 const PAGE = 100;
+
+// DDL that changes the set/shape of tables — used to auto-refresh the sidebar
+// after such a statement runs in the Query tab (e.g. importing a dump).
+const DDL_RE = /\b(?:create|drop|alter|rename)\s+(?:temporary\s+|temp\s+)?(?:table|view)\b/i;
 
 interface Form {
   name: string;
@@ -96,8 +112,18 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
   const [connId, setConnId] = useState<string | null>(null);
   const [connName, setConnName] = useState("");
   const [connDialect, setConnDialect] = useState<DbDialect>("postgres");
+  // The coordinates of the live connection (incl. password) so we can reconnect
+  // to a different database without re-prompting — powers the DB switcher.
+  const [activeInfo, setActiveInfo] = useState<ConnInfo | null>(null);
+  const [databases, setDatabases] = useState<string[]>([]);
   const [importing, setImporting] = useState(false);
   const [tables, setTables] = useState<string[]>([]);
+  // Tables checked for a bulk drop, plus the confirm-dialog + in-flight flags.
+  const [selectedTables, setSelectedTables] = useState<Set<string>>(new Set());
+  const [dropOpen, setDropOpen] = useState(false);
+  const [dropping, setDropping] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [importSqlOpen, setImportSqlOpen] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [view, setView] = useState<"data" | "structure" | "query" | "diagram">("data");
   const [offset, setOffset] = useState(0);
@@ -173,14 +199,15 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
       });
   };
 
-  const connect = (info: ConnInfo, name: string) => {
-    setConnecting(true);
-    setConnError(null);
-    dbConnect(info)
-      .then((id) => {
-        setConnId(id);
-        setConnName(name);
-        setConnDialect(info.dialect);
+  // Open a connection and load its tables + database list. Shared by the
+  // initial connect and the database switcher. Resolves with the new conn id.
+  const openConnection = (info: ConnInfo, name: string, save: boolean): Promise<string> =>
+    dbConnect(info).then((id) => {
+      setConnId(id);
+      setConnName(name);
+      setConnDialect(info.dialect);
+      setActiveInfo(info);
+      if (save) {
         saveConn({
           name,
           dialect: info.dialect,
@@ -192,23 +219,62 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
           // so any previously remembered password for this name is dropped.
           ...(remember ? { password: info.password } : {}),
         });
-        return dbTables(id).then((ts) => {
-          setTables(ts);
-          setView("data");
-          setOffset(0);
-          const first = ts[0];
-          if (first) {
-            setSelected(first);
-            loadData(id, first, 0, "", null);
-            loadPk(id, info.dialect, first);
-          } else {
-            setSelected(null);
-            setResult(null);
-          }
+      }
+      // Best-effort: a failed list just hides the switcher, never blocks connect.
+      void dbDatabases(id)
+        .then(setDatabases)
+        .catch(() => {
+          setDatabases([]);
         });
-      })
+      return dbTables(id).then((ts) => {
+        setTables(ts);
+        setSelectedTables(new Set());
+        setView("data");
+        setOffset(0);
+        setSearch("");
+        setSort(null);
+        const first = ts[0];
+        if (first) {
+          setSelected(first);
+          loadData(id, first, 0, "", null);
+          loadPk(id, info.dialect, first);
+          loadCount(id, first);
+        } else {
+          setSelected(null);
+          setResult(null);
+        }
+        return id;
+      });
+    });
+
+  const connect = (info: ConnInfo, name: string) => {
+    setConnecting(true);
+    setConnError(null);
+    openConnection(info, name, true)
       .catch((e: unknown) => {
         setConnError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        setConnecting(false);
+      });
+  };
+
+  // phpMyAdmin-style database switch: reconnect to the same server on a
+  // different database, then drop the previous connection on success.
+  const switchDatabase = (database: string) => {
+    if (!activeInfo || connecting || database === activeInfo.database) return;
+    const previous = connId;
+    setConnecting(true);
+    setConnError(null);
+    openConnection({ ...activeInfo, database }, connName, false)
+      .then(() => {
+        if (previous) void dbDisconnect(previous).catch(() => undefined);
+        toast.success(`Switched to “${database}”.`);
+      })
+      .catch((e: unknown) => {
+        toast.error(
+          `Couldn't switch to “${database}”: ${e instanceof Error ? e.message : String(e)}`,
+        );
       })
       .finally(() => {
         setConnecting(false);
@@ -218,7 +284,11 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
   const disconnect = () => {
     if (connId) void dbDisconnect(connId).catch(() => undefined);
     setConnId(null);
+    setActiveInfo(null);
+    setDatabases([]);
     setTables([]);
+    setSelectedTables(new Set());
+    setDropOpen(false);
     setSelected(null);
     setResult(null);
     setResultError(null);
@@ -227,6 +297,55 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
     setPkColumns([]);
     setRowCount(null);
     setInserting(false);
+  };
+
+  const toggleTableSelect = (t: string) => {
+    setSelectedTables((prev) => {
+      const next = new Set(prev);
+      if (next.has(t)) next.delete(t);
+      else next.add(t);
+      return next;
+    });
+  };
+
+  // Drop every checked table in one operation, optionally ignoring FK checks,
+  // then refresh the table list and reset anything that pointed at them.
+  const dropSelected = (disableFk: boolean) => {
+    if (!connId || selectedTables.size === 0) return;
+    const targets = [...selectedTables];
+    const id = connId;
+    setDropping(true);
+    dbDropTables(id, targets, disableFk)
+      .then((n) => {
+        toast.success(`Dropped ${String(n)} table${n === 1 ? "" : "s"}.`);
+        setDropOpen(false);
+        setSelectedTables(new Set());
+        // The cached introspection is now stale (Structure / Diagram tabs).
+        setDiagramSchema(null);
+        return dbTables(id).then((ts) => {
+          setTables(ts);
+          if (selected && targets.includes(selected)) {
+            const first = ts[0] ?? null;
+            setSelected(first);
+            if (first) {
+              setOffset(0);
+              setSearch("");
+              setSort(null);
+              loadData(id, first, 0, "", null);
+              loadPk(id, connDialect, first);
+              loadCount(id, first);
+            } else {
+              setResult(null);
+            }
+          }
+        });
+      })
+      .catch((e: unknown) => {
+        toast.error(`Drop failed: ${e instanceof Error ? e.message : String(e)}`);
+      })
+      .finally(() => {
+        setDropping(false);
+      });
   };
 
   // Look up the table's primary key so rows can be edited safely (best-effort).
@@ -426,8 +545,8 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
 
   // Introspect the live database once and cache it; both the Structure and
   // Diagram tabs read from this. No-op if already loaded or loading.
-  const ensureIntrospected = () => {
-    if (diagramSchema || diagramLoading || !connId) return;
+  const ensureIntrospected = (force = false) => {
+    if ((!force && diagramSchema) || diagramLoading || !connId) return;
     setDiagramLoading(true);
     setDiagramError(null);
     introspectSchema(connId, connDialect, connName)
@@ -475,6 +594,52 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
       });
   };
 
+  // Re-read the table list (and invalidate the cached Structure/Diagram schema)
+  // so tables created/dropped after connecting show up. `silent` skips the toast
+  // for the automatic refresh that follows DDL in the Query tab.
+  const refreshTables = (silent = false) => {
+    if (!connId) return;
+    const id = connId;
+    setRefreshing(true);
+    dbTables(id)
+      .then((ts) => {
+        setTables(ts);
+        // The cached introspection (Structure / Diagram) is now stale.
+        if (view === "structure" || view === "diagram") ensureIntrospected(true);
+        else setDiagramSchema(null);
+
+        if (selected && !ts.includes(selected)) {
+          // The open table is gone — fall back to the first remaining one.
+          const first = ts[0] ?? null;
+          setSelected(first);
+          if (first) {
+            setOffset(0);
+            setSearch("");
+            setSort(null);
+            loadData(id, first, 0, "", null);
+            loadPk(id, connDialect, first);
+            loadCount(id, first);
+          } else {
+            setResult(null);
+          }
+        } else if (!silent && selected && view === "data") {
+          // A manual refresh also re-pulls the current table's rows + count.
+          loadData(id, selected, offset, search, sort);
+          loadCount(id, selected);
+        }
+
+        if (!silent) {
+          toast.success(`Refreshed · ${String(ts.length)} table${ts.length === 1 ? "" : "s"}.`);
+        }
+      })
+      .catch((e: unknown) => {
+        if (!silent) toast.error(`Refresh failed: ${e instanceof Error ? e.message : String(e)}`);
+      })
+      .finally(() => {
+        setRefreshing(false);
+      });
+  };
+
   const runQuery = (sql: string = query) => {
     if (!connId) return;
     setLoading(true);
@@ -487,6 +652,8 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
     dbQuery(connId, sql)
       .then((r) => {
         setResult(r);
+        // If the statement created/dropped/altered tables, refresh the sidebar.
+        if (DDL_RE.test(trimmed)) refreshTables(true);
       })
       .catch((e: unknown) => {
         setResultError(e instanceof Error ? e.message : String(e));
@@ -828,11 +995,50 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
   }
 
   // ---- connected: client workspace ----
+  const visibleTables = tables.filter((t) =>
+    t.toLowerCase().includes(tableFilter.toLowerCase()),
+  );
+  const allVisibleSelected =
+    visibleTables.length > 0 && visibleTables.every((t) => selectedTables.has(t));
+  const toggleSelectAllVisible = () => {
+    setSelectedTables((prev) => {
+      const next = new Set(prev);
+      if (allVisibleSelected) visibleTables.forEach((t) => next.delete(t));
+      else visibleTables.forEach((t) => next.add(t));
+      return next;
+    });
+  };
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex h-10 flex-none items-center gap-2 border-b border-line bg-panel px-3">
         <PlugZap size={15} className="text-acc" />
         <span className="text-[12.5px] font-semibold">{connName}</span>
+        {activeInfo && (
+          <label
+            className="ml-1 flex items-center gap-1 text-[11.5px] text-dim"
+            title="Switch database"
+          >
+            <Database size={13} className="text-faint" />
+            <select
+              value={activeInfo.database}
+              disabled={connecting}
+              onChange={(e) => {
+                switchDatabase(e.target.value);
+              }}
+              className="max-w-[180px] rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] text-ink outline-none focus:border-acc disabled:opacity-50"
+            >
+              {(databases.includes(activeInfo.database)
+                ? databases
+                : [activeInfo.database, ...databases]
+              ).map((d) => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <div className="ml-3 flex gap-0.5 rounded-lg border border-line bg-panel2 p-0.5">
           <Tab label="Data" active={view === "data"} onClick={() => setView("data")} />
           <Tab label="Structure" active={view === "structure"} onClick={openStructure} />
@@ -841,10 +1047,21 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
         </div>
         <button
           type="button"
+          onClick={() => {
+            setImportSqlOpen(true);
+          }}
+          title="Run a .sql file (schema + data) against this database"
+          className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12px] hover:border-acc/50 hover:text-acc"
+        >
+          <Upload size={14} />
+          Import SQL
+        </button>
+        <button
+          type="button"
           onClick={importToDiagram}
           disabled={importing}
           title="Reverse-engineer this database into a diagram"
-          className="ml-auto inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-semibold text-white shadow-glow disabled:opacity-40"
+          className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-semibold text-white shadow-glow disabled:opacity-40"
           style={{ background: GRADIENT }}
         >
           <GitBranch size={14} />
@@ -882,8 +1099,21 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
       ) : (
         <div className="grid min-h-0 flex-1 grid-cols-[220px_1fr]">
           <aside className="min-h-0 overflow-auto border-r border-line bg-panel p-2">
-            <div className="px-2 py-1 text-[11px] font-bold uppercase tracking-wider text-faint">
-              Tables · {tables.length}
+            <div className="flex items-center px-2 py-1">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-faint">
+                Tables · {tables.length}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  refreshTables();
+                }}
+                disabled={refreshing}
+                title="Refresh table list"
+                className="ml-auto grid h-5 w-5 place-items-center rounded text-faint hover:bg-panel2 hover:text-ink disabled:opacity-50"
+              >
+                <RefreshCw size={12} className={refreshing ? "animate-spin" : ""} />
+              </button>
             </div>
             {tables.length > 0 && (
               <div className="relative px-1 pb-1.5">
@@ -898,6 +1128,31 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                 />
               </div>
             )}
+            {tables.length > 0 && (
+              <div className="mb-1 flex items-center gap-2 px-2 py-0.5">
+                <label className="flex items-center gap-1.5 text-[11px] text-faint">
+                  <input
+                    type="checkbox"
+                    checked={allVisibleSelected}
+                    onChange={toggleSelectAllVisible}
+                    className="h-3.5 w-3.5 accent-[#a64bff]"
+                  />
+                  {selectedTables.size > 0 ? `${String(selectedTables.size)} selected` : "Select all"}
+                </label>
+                {selectedTables.size > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDropOpen(true);
+                    }}
+                    className="ml-auto inline-flex items-center gap-1 rounded-md border border-crit/40 bg-crit/10 px-2 py-0.5 text-[11px] font-semibold text-crit hover:bg-crit/20"
+                  >
+                    <Trash2 size={12} />
+                    Drop
+                  </button>
+                )}
+              </div>
+            )}
             {tables.length === 0 && (
               <p className="px-2 py-2 text-[11px] leading-snug text-med">
                 No tables in the selected database. The{" "}
@@ -907,34 +1162,47 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                 you're connected to.
               </p>
             )}
-            {tables
-              .filter((t) => t.toLowerCase().includes(tableFilter.toLowerCase()))
-              .map((t) => (
-                <button
+            {visibleTables.map((t) => {
+              const active = selected === t && (view === "data" || view === "structure");
+              const checked = selectedTables.has(t);
+              return (
+                <div
                   key={t}
-                  type="button"
-                  onClick={() => {
-                    openTable(t);
-                  }}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    setMenu({ x: e.clientX, y: e.clientY, items: tableMenu(t) });
-                  }}
-                  className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] ${
-                    selected === t && (view === "data" || view === "structure")
-                      ? "bg-acc/15 text-acc"
-                      : "hover:bg-panel2"
+                  className={`flex items-center gap-1.5 rounded-md px-2 py-1.5 ${
+                    active ? "bg-acc/15" : checked ? "bg-panel2" : "hover:bg-panel2"
                   }`}
                 >
-                  <Table2 size={13} className="flex-none opacity-70" />
-                  <span className="truncate">{t}</span>
-                </button>
-              ))}
-            {tables.length > 0 &&
-              tables.filter((t) => t.toLowerCase().includes(tableFilter.toLowerCase())).length ===
-                0 && (
-                <p className="px-2 py-2 text-[11px] text-faint">No tables match “{tableFilter}”.</p>
-              )}
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => {
+                      toggleTableSelect(t);
+                    }}
+                    title="Select for bulk drop"
+                    className="h-3.5 w-3.5 flex-none accent-[#a64bff]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      openTable(t);
+                    }}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setMenu({ x: e.clientX, y: e.clientY, items: tableMenu(t) });
+                    }}
+                    className={`flex min-w-0 flex-1 items-center gap-2 text-left text-[12.5px] ${
+                      active ? "text-acc" : ""
+                    }`}
+                  >
+                    <Table2 size={13} className="flex-none opacity-70" />
+                    <span className="truncate">{t}</span>
+                  </button>
+                </div>
+              );
+            })}
+            {tables.length > 0 && visibleTables.length === 0 && (
+              <p className="px-2 py-2 text-[11px] text-faint">No tables match “{tableFilter}”.</p>
+            )}
           </aside>
 
           <section className="flex min-h-0 flex-col">
@@ -1204,6 +1472,329 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
           }}
         />
       )}
+
+      {dropOpen && (
+        <DropTablesDialog
+          tables={[...selectedTables]}
+          dialect={connDialect}
+          dropping={dropping}
+          onCancel={() => {
+            if (!dropping) setDropOpen(false);
+          }}
+          onDrop={dropSelected}
+        />
+      )}
+
+      {importSqlOpen && activeInfo && connId && (
+        <ImportSqlDialog
+          connId={connId}
+          database={activeInfo.database}
+          onClose={() => {
+            setImportSqlOpen(false);
+          }}
+          onDone={() => {
+            refreshTables(true);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// Read this many bytes per slice. The whole file is never held in memory — we
+// stream slices, split off complete statements, and send them in batches.
+const IMPORT_CHUNK = 4 * 1024 * 1024;
+const IMPORT_BATCH = 400;
+
+/**
+ * phpMyAdmin-style import: pick a .sql file and run it against the database.
+ * The file is streamed in chunks so dumps of any size import without loading
+ * the whole script into memory or sending it across the bridge at once.
+ */
+function ImportSqlDialog({
+  connId,
+  database,
+  onClose,
+  onDone,
+}: {
+  connId: string;
+  database: string;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [file, setFile] = useState<File | null>(null);
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const run = async () => {
+    if (!file) return;
+    setRunning(true);
+    setProgress(0);
+    let importId: string | null = null;
+    try {
+      importId = await dbImportBegin(connId);
+      let offset = 0;
+      let buffer = "";
+      let totalRows = 0;
+      let pending: string[] = [];
+      const flush = async () => {
+        if (pending.length === 0) return;
+        totalRows += await dbImportExec(importId as string, pending);
+        pending = [];
+      };
+      while (offset < file.size) {
+        const text = await file.slice(offset, offset + IMPORT_CHUNK).text();
+        offset += IMPORT_CHUNK;
+        buffer += text;
+        const { statements, rest } = extractStatements(buffer);
+        buffer = rest;
+        for (const s of statements) {
+          pending.push(s);
+          if (pending.length >= IMPORT_BATCH) await flush();
+        }
+        await flush();
+        setProgress(Math.min(100, Math.round((offset / file.size) * 100)));
+      }
+      // Emit any final statement that lacked a trailing semicolon.
+      for (const s of flushStatements(buffer)) pending.push(s);
+      await flush();
+
+      toast.success(`Imported “${file.name}” · ${String(totalRows)} row(s) affected.`);
+      onDone();
+      onClose();
+    } catch (e: unknown) {
+      toast.error(`Import failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      if (importId) await dbImportFinish(importId).catch(() => undefined);
+      setRunning(false);
+    }
+  };
+
+  const sizeLabel = (n: number): string =>
+    n < 1024
+      ? `${String(n)} B`
+      : n < 1024 * 1024
+        ? `${(n / 1024).toFixed(1)} KB`
+        : `${(n / 1024 / 1024).toFixed(1)} MB`;
+
+  return (
+    <div
+      className="fixed inset-0 z-[55] grid animate-fade place-items-center bg-black/60 p-6 backdrop-blur-sm"
+      onClick={() => {
+        if (!running) onClose();
+      }}
+    >
+      <div
+        className="glass-strong flex w-[460px] max-w-full animate-pop flex-col overflow-hidden rounded-xl border border-line/70 shadow-2xl"
+        onClick={(e) => {
+          e.stopPropagation();
+        }}
+      >
+        <div className="flex flex-none items-center gap-2 border-b border-line px-4 py-3">
+          <span
+            className="grid h-[18px] w-[18px] place-items-center rounded text-white"
+            style={{ background: GRADIENT }}
+          >
+            <Upload size={11} />
+          </span>
+          <span className="text-[14px] font-bold">Import SQL</span>
+          <span className="font-mono text-[11px] text-faint">→ {database}</span>
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={running}
+            className="ml-auto grid place-items-center text-faint hover:text-ink disabled:opacity-40"
+          >
+            <X size={15} />
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-auto p-4">
+          <input
+            ref={inputRef}
+            type="file"
+            accept=".sql,.txt,application/sql,text/plain"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) setFile(f);
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => inputRef.current?.click()}
+            disabled={running}
+            className="flex w-full items-center gap-2 rounded-lg border border-dashed border-line2 bg-panel2 px-3 py-3 text-left hover:border-acc/60 disabled:opacity-50"
+          >
+            <FileText size={16} className="flex-none text-acc" />
+            {file ? (
+              <span className="min-w-0">
+                <span className="block truncate text-[12.5px] font-semibold">{file.name}</span>
+                <span className="text-[11px] text-faint">
+                  {sizeLabel(file.size)} · click to change
+                </span>
+              </span>
+            ) : (
+              <span className="text-[12.5px] text-dim">Choose a .sql file…</span>
+            )}
+          </button>
+
+          <div className="mt-3 flex items-start gap-2 rounded-lg border border-med/30 bg-med/10 px-3 py-2 text-[11.5px] text-med">
+            <AlertTriangle size={14} className="mt-0.5 flex-none" />
+            <span>
+              Statements run directly against <span className="font-semibold">{database}</span>. This
+              can create, modify, or overwrite data and isn&apos;t undoable.
+            </span>
+          </div>
+
+          {running && (
+            <div className="mt-3">
+              <div className="mb-1 flex items-center justify-between text-[11px] text-dim">
+                <span>Streaming &amp; importing…</span>
+                <span className="font-mono tabular-nums">{progress}%</span>
+              </div>
+              <div className="h-1.5 overflow-hidden rounded-full bg-panel">
+                <div
+                  className="h-full rounded-full bg-acc transition-all"
+                  style={{ width: `${String(progress)}%` }}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="flex flex-none items-center justify-end gap-2 border-t border-line px-4 py-3">
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={running}
+            className="rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12.5px] disabled:opacity-40"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              void run();
+            }}
+            disabled={!file || running}
+            className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12.5px] font-semibold text-white shadow-glow disabled:opacity-40 disabled:shadow-none"
+            style={{ background: GRADIENT }}
+          >
+            {running ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
+            {running ? "Importing…" : "Import"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Confirm dropping several tables at once, with an opt-in to skip FK checks. */
+function DropTablesDialog({
+  tables,
+  dialect,
+  dropping,
+  onCancel,
+  onDrop,
+}: {
+  tables: string[];
+  dialect: DbDialect;
+  dropping: boolean;
+  onCancel: () => void;
+  onDrop: (disableFk: boolean) => void;
+}) {
+  const [disableFk, setDisableFk] = useState(false);
+  const fkHint =
+    dialect === "mysql"
+      ? "Runs with FOREIGN_KEY_CHECKS = 0 so tables referenced by others still drop."
+      : "Uses DROP TABLE … CASCADE, which also drops dependent foreign keys.";
+
+  return (
+    <div
+      className="fixed inset-0 z-[55] grid animate-fade place-items-center bg-black/60 p-6 backdrop-blur-sm"
+      onClick={onCancel}
+    >
+      <div
+        className="glass-strong flex max-h-[80vh] w-[460px] max-w-full animate-pop flex-col overflow-hidden rounded-xl border border-line/70 shadow-2xl"
+        onClick={(e) => {
+          e.stopPropagation();
+        }}
+      >
+        <div className="flex flex-none items-center gap-2 border-b border-line px-4 py-3">
+          <span className="grid h-[18px] w-[18px] place-items-center rounded bg-crit/20 text-crit">
+            <Trash2 size={12} />
+          </span>
+          <span className="text-[14px] font-bold">
+            Drop {tables.length} table{tables.length === 1 ? "" : "s"}?
+          </span>
+          <button
+            type="button"
+            onClick={onCancel}
+            className="ml-auto grid place-items-center text-faint hover:text-ink"
+          >
+            <X size={15} />
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-auto p-4">
+          <div className="flex items-start gap-2 rounded-lg border border-crit/30 bg-crit/10 px-3 py-2 text-[11.5px] text-crit">
+            <AlertTriangle size={14} className="mt-0.5 flex-none" />
+            <span>This permanently deletes the table(s) and all their data. It can't be undone.</span>
+          </div>
+
+          <div className="mt-3 max-h-40 overflow-auto rounded-lg border border-line bg-panel2 p-2">
+            {tables.map((t) => (
+              <div key={t} className="flex items-center gap-2 py-0.5 font-mono text-[12px]">
+                <Table2 size={12} className="flex-none text-faint" />
+                {t}
+              </div>
+            ))}
+          </div>
+
+          <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12px]">
+            <input
+              type="checkbox"
+              checked={disableFk}
+              disabled={dropping}
+              onChange={(e) => {
+                setDisableFk(e.target.checked);
+              }}
+              className="mt-0.5 h-3.5 w-3.5 accent-[#a64bff]"
+            />
+            <span>
+              <span className="inline-flex items-center gap-1 font-semibold text-ink">
+                <ShieldOff size={12} className="text-med" />
+                Drop without foreign-key checks
+              </span>
+              <span className="mt-0.5 block text-[11px] text-faint">{fkHint}</span>
+            </span>
+          </label>
+        </div>
+
+        <div className="flex flex-none items-center justify-end gap-2 border-t border-line px-4 py-3">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={dropping}
+            className="rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12.5px] disabled:opacity-40"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              onDrop(disableFk);
+            }}
+            disabled={dropping}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-crit/50 bg-crit/15 px-3 py-1.5 text-[12.5px] font-semibold text-crit hover:bg-crit/25 disabled:opacity-40"
+          >
+            <Trash2 size={13} />
+            {dropping ? "Dropping…" : `Drop ${String(tables.length)}`}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

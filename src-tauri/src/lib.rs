@@ -7,11 +7,18 @@ mod mcp;
 pub fn run() {
     tauri::Builder::default()
         .manage(db::DbState::default())
+        .manage(db::ImportState::default())
         .manage(mcp::McpState::default())
         .invoke_handler(tauri::generate_handler![
             db::db_connect,
             db::db_disconnect,
             db::db_tables,
+            db::db_databases,
+            db::db_drop_tables,
+            db::db_run_script,
+            db::db_import_begin,
+            db::db_import_exec,
+            db::db_import_finish,
             db::db_query,
             db::db_execute,
             db::db_table_data,

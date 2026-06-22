@@ -82,6 +82,7 @@ export function App() {
   const setTheme = useSettings((s) => s.setTheme);
 
   const [importOpen, setImportOpen] = useState(false);
+  const [importMode, setImportMode] = useState<"laravel" | "sql">("laravel");
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [catalogOpen, setCatalogOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -187,6 +188,12 @@ export function App() {
     setNewConfirmOpen(true);
   };
 
+  // Open the import dialog, optionally pre-selecting the SQL or Laravel tab.
+  const openImport = (m: "laravel" | "sql" = "laravel") => {
+    setImportMode(m);
+    setImportOpen(true);
+  };
+
   // Global keyboard shortcuts.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -234,7 +241,15 @@ export function App() {
         group: "File",
         label: "Import Laravel migrations…",
         run: () => {
-          setImportOpen(true);
+          openImport("laravel");
+        },
+      },
+      {
+        id: "import-sql",
+        group: "File",
+        label: "Import SQL file…",
+        run: () => {
+          openImport("sql");
         },
       },
       {
@@ -396,11 +411,12 @@ export function App() {
                 label={
                   <span className="inline-flex items-center gap-1.5">
                     <FileInput size={14} />
-                    Import Laravel
+                    Import
                   </span>
                 }
+                title="Import a schema from Laravel migrations or a SQL file"
                 onClick={() => {
-                  setImportOpen(true);
+                  openImport("laravel");
                 }}
               />
             </div>
@@ -554,19 +570,20 @@ export function App() {
                 <div className="glass pointer-events-auto flex animate-pop flex-col items-center gap-3 rounded-2xl border border-line/70 px-8 py-7 text-center shadow-2xl">
                   <div className="text-[14px] font-semibold">No tables yet</div>
                   <div className="max-w-[260px] text-[12px] text-dim">
-                    Import Laravel migrations, load the sample, or add a table to start designing.
+                    Import Laravel migrations or a SQL file, load the sample, or add a table to
+                    start designing.
                   </div>
                   <div className="mt-1 flex gap-2">
                     <button
                       type="button"
                       onClick={() => {
-                        setImportOpen(true);
+                        openImport("laravel");
                       }}
                       className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12.5px] font-semibold text-white shadow-glow"
                       style={{ background: GRADIENT }}
                     >
                       <FileInput size={14} />
-                      Import Laravel
+                      Import
                     </button>
                     {recentCount > 0 && (
                       <button
@@ -619,6 +636,7 @@ export function App() {
 
       {importOpen && (
         <ImportDialog
+          initialMode={importMode}
           onClose={() => {
             setImportOpen(false);
           }}

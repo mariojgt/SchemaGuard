@@ -46,7 +46,10 @@ export function parseSql(source: string): SqlParseResult {
   return { schema: { name: "Imported", tables }, warnings };
 }
 
-/** Remove `-- …` / `# …` line comments and `/* … */` blocks, quote-aware. */
+/** A single backslash, built without a literal to avoid escaping pitfalls. */
+const BACKSLASH = String.fromCharCode(92);
+
+/** Remove SQL line comments (-- … and # …) and block comments, quote-aware. */
 function stripComments(src: string): string {
   let out = "";
   let quote: string | null = null;
@@ -55,7 +58,7 @@ function stripComments(src: string): string {
     const next = src[i + 1];
     if (quote) {
       out += ch;
-      if (ch.charCodeAt(0) === 92 && quote !== "`" && next !== undefined) {
+      if (ch === BACKSLASH && quote !== "`" && next !== undefined) {
         out += next;
         i++;
       } else if (ch === quote) {
@@ -95,7 +98,7 @@ function splitStatements(src: string): string[] {
     const ch = src[i];
     if (quote) {
       cur += ch;
-      if (ch.charCodeAt(0) === 92 && quote !== "`" && i + 1 < src.length) {
+      if (ch === BACKSLASH && quote !== "`" && i + 1 < src.length) {
         cur += src[i + 1];
         i++;
       } else if (ch === quote) {
