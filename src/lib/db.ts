@@ -51,3 +51,16 @@ export function dbTableData(
 ): Promise<QueryResult> {
   return invoke<QueryResult>("db_table_data", { id, table, limit, offset });
 }
+
+/** List every database on the connected server. */
+export function dbListDatabases(id: string): Promise<string[]> {
+  return invoke<string[]>("db_list_databases", { id });
+}
+
+export function dbCreateDatabase(id: string, name: string): Promise<void> {
+  return invoke<void>("db_create_database", { id, name });
+}
+
+export function dbDropDatabase(id: string, name: string): Promise<void> {
+  return invoke<void>("db_drop_database", { id, name });
+}

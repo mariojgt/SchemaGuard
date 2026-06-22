@@ -1,6 +1,7 @@
 import type { CanonicalType, Schema, Table } from "@schemaguard/core";
 import {
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Copy,
@@ -38,8 +39,11 @@ import {
 import type { ConnInfo, DbDialect, QueryResult } from "../lib/db";
 import {
   dbConnect,
+  dbCreateDatabase,
   dbDisconnect,
+  dbDropDatabase,
   dbExecute,
+  dbListDatabases,
   dbQuery,
   dbTableData,
   dbTables,
@@ -96,6 +100,16 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
   const [connId, setConnId] = useState<string | null>(null);
   const [connName, setConnName] = useState("");
   const [connDialect, setConnDialect] = useState<DbDialect>("postgres");
+  // Credentials of the live connection, kept so we can reconnect to a sibling
+  // database on the same server when the user switches databases.
+  const [activeInfo, setActiveInfo] = useState<ConnInfo | null>(null);
+  // The multi-database switcher: list of databases on the server + its popover.
+  const [databases, setDatabases] = useState<string[]>([]);
+  const [dbMenuOpen, setDbMenuOpen] = useState(false);
+  const [newDb, setNewDb] = useState("");
+  const [dbBusy, setDbBusy] = useState(false);
+  // Two-step delete: the database name awaiting an inline "Confirm" click.
+  const [confirmDropDb, setConfirmDropDb] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [tables, setTables] = useState<string[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
@@ -173,6 +187,35 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
       });
   };
 
+  // Load the table list for a freshly-opened connection and show the first one.
+  // Shared by the initial connect and by switching to a sibling database.
+  const loadInitial = (id: string, dialect: DbDialect) =>
+    dbTables(id).then((ts) => {
+      setTables(ts);
+      setView("data");
+      setOffset(0);
+      setSearch("");
+      setSort(null);
+      setInserting(false);
+      const first = ts[0];
+      if (first) {
+        setSelected(first);
+        loadData(id, first, 0, "", null);
+        loadPk(id, dialect, first);
+      } else {
+        setSelected(null);
+        setResult(null);
+      }
+    });
+
+  // Fetch the list of databases on the server (best-effort; powers the switcher).
+  const loadDatabases = (id: string) =>
+    dbListDatabases(id)
+      .then(setDatabases)
+      .catch(() => {
+        setDatabases([]);
+      });
+
   const connect = (info: ConnInfo, name: string) => {
     setConnecting(true);
     setConnError(null);
@@ -181,6 +224,8 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
         setConnId(id);
         setConnName(name);
         setConnDialect(info.dialect);
+        setActiveInfo(info);
+        void loadDatabases(id);
         saveConn({
           name,
           dialect: info.dialect,
@@ -192,20 +237,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
           // so any previously remembered password for this name is dropped.
           ...(remember ? { password: info.password } : {}),
         });
-        return dbTables(id).then((ts) => {
-          setTables(ts);
-          setView("data");
-          setOffset(0);
-          const first = ts[0];
-          if (first) {
-            setSelected(first);
-            loadData(id, first, 0, "", null);
-            loadPk(id, info.dialect, first);
-          } else {
-            setSelected(null);
-            setResult(null);
-          }
-        });
+        return loadInitial(id, info.dialect);
       })
       .catch((e: unknown) => {
         setConnError(e instanceof Error ? e.message : String(e));
@@ -215,9 +247,81 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
       });
   };
 
+  // Switch to another database on the same server. Connections are database-
+  // scoped (especially in Postgres), so this opens a fresh connection with the
+  // same credentials and retires the old one. Saved connections are untouched.
+  const switchDatabase = (database: string) => {
+    setDbMenuOpen(false);
+    setConfirmDropDb(null);
+    if (!activeInfo || database === activeInfo.database) return;
+    const next: ConnInfo = { ...activeInfo, database };
+    const previous = connId;
+    setConnecting(true);
+    dbConnect(next)
+      .then((id) => {
+        if (previous) void dbDisconnect(previous).catch(() => undefined);
+        setConnId(id);
+        setActiveInfo(next);
+        setDiagramSchema(null);
+        setDiagramError(null);
+        void loadDatabases(id);
+        return loadInitial(id, next.dialect);
+      })
+      .catch((e: unknown) => {
+        toast.error(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        setConnecting(false);
+      });
+  };
+
+  const createDatabase = () => {
+    const name = newDb.trim();
+    if (!connId || name === "" || dbBusy) return;
+    setDbBusy(true);
+    dbCreateDatabase(connId, name)
+      .then(() => {
+        toast.success(`Database "${name}" created.`);
+        setNewDb("");
+        return loadDatabases(connId);
+      })
+      .catch((e: unknown) => {
+        toast.error(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        setDbBusy(false);
+      });
+  };
+
+  const dropDatabase = (name: string) => {
+    if (!connId || dbBusy) return;
+    if (activeInfo && name === activeInfo.database) {
+      toast.error("Can't drop the database you're connected to — switch to another first.");
+      return;
+    }
+    setConfirmDropDb(null);
+    setDbBusy(true);
+    dbDropDatabase(connId, name)
+      .then(() => {
+        toast.success(`Database "${name}" dropped.`);
+        return loadDatabases(connId);
+      })
+      .catch((e: unknown) => {
+        toast.error(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        setDbBusy(false);
+      });
+  };
+
   const disconnect = () => {
     if (connId) void dbDisconnect(connId).catch(() => undefined);
     setConnId(null);
+    setActiveInfo(null);
+    setDatabases([]);
+    setDbMenuOpen(false);
+    setConfirmDropDb(null);
+    setNewDb("");
     setTables([]);
     setSelected(null);
     setResult(null);
@@ -833,6 +937,136 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
       <div className="flex h-10 flex-none items-center gap-2 border-b border-line bg-panel px-3">
         <PlugZap size={15} className="text-acc" />
         <span className="text-[12.5px] font-semibold">{connName}</span>
+        {activeInfo && (
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => {
+                setConfirmDropDb(null);
+                setDbMenuOpen((o) => !o);
+                if (connId) void loadDatabases(connId);
+              }}
+              title="Switch, create, or drop databases on this server"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-panel2 px-2.5 py-1 text-[12px] hover:border-line2"
+            >
+              <Database size={13} className="text-acc" />
+              <span className="font-mono">{activeInfo.database}</span>
+              <ChevronDown size={12} className="text-faint" />
+            </button>
+            {dbMenuOpen && (
+              <>
+                <button
+                  type="button"
+                  aria-label="Close database menu"
+                  className="fixed inset-0 z-30 cursor-default"
+                  onClick={() => {
+                    setDbMenuOpen(false);
+                    setConfirmDropDb(null);
+                  }}
+                />
+                <div className="absolute left-0 top-full z-40 mt-1.5 w-72 overflow-hidden rounded-xl border border-line bg-panel shadow-2xl">
+                  <div className="border-b border-line px-3 py-2 text-[10.5px] font-bold uppercase tracking-wider text-faint">
+                    Databases on this server
+                  </div>
+                  <div className="max-h-64 overflow-auto py-1">
+                    {databases.length === 0 && (
+                      <div className="px-3 py-2 text-[11.5px] text-faint">No databases found.</div>
+                    )}
+                    {databases.map((d) => {
+                      const current = d === activeInfo.database;
+                      return (
+                        <div
+                          key={d}
+                          className={`group flex items-center gap-2 px-2 py-1 ${
+                            current ? "bg-acc/10" : "hover:bg-panel2"
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            disabled={connecting}
+                            onClick={() => {
+                              switchDatabase(d);
+                            }}
+                            className="flex min-w-0 flex-1 items-center gap-2 text-left disabled:opacity-50"
+                          >
+                            <Database size={12} className={current ? "text-acc" : "text-faint"} />
+                            <span
+                              className={`truncate font-mono text-[12px] ${
+                                current ? "font-semibold text-acc" : ""
+                              }`}
+                            >
+                              {d}
+                            </span>
+                            {current && <Check size={12} className="ml-auto flex-none text-acc" />}
+                          </button>
+                          {!current &&
+                            (confirmDropDb === d ? (
+                              <div className="flex flex-none items-center gap-1">
+                                <button
+                                  type="button"
+                                  disabled={dbBusy}
+                                  onClick={() => {
+                                    dropDatabase(d);
+                                  }}
+                                  className="rounded border border-crit/50 bg-crit/15 px-1.5 py-0.5 text-[10.5px] font-semibold text-crit hover:bg-crit/25 disabled:opacity-50"
+                                >
+                                  Drop
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setConfirmDropDb(null);
+                                  }}
+                                  className="grid h-5 w-5 place-items-center rounded text-faint hover:text-high"
+                                >
+                                  <X size={12} />
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                title={`Drop "${d}"`}
+                                onClick={() => {
+                                  setConfirmDropDb(d);
+                                }}
+                                className="grid h-5 w-5 flex-none place-items-center rounded text-faint opacity-0 hover:text-crit group-hover:opacity-100"
+                              >
+                                <Trash2 size={12} />
+                              </button>
+                            ))}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="flex items-center gap-1.5 border-t border-line p-2">
+                    <input
+                      className="min-w-0 flex-1 rounded-md border border-line bg-panel2 px-2 py-1 text-[12px] outline-none focus:border-acc"
+                      placeholder="New database name"
+                      value={newDb}
+                      onChange={(e) => {
+                        setNewDb(e.target.value);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") createDatabase();
+                      }}
+                    />
+                    <button
+                      type="button"
+                      disabled={dbBusy || newDb.trim() === ""}
+                      onClick={createDatabase}
+                      title="Create database"
+                      className="inline-flex flex-none items-center gap-1 rounded-md px-2 py-1 text-[12px] font-semibold text-white disabled:opacity-40"
+                      style={{ background: GRADIENT }}
+                    >
+                      <Plus size={13} />
+                      Create
+                    </button>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
         <div className="ml-3 flex gap-0.5 rounded-lg border border-line bg-panel2 p-0.5">
           <Tab label="Data" active={view === "data"} onClick={() => setView("data")} />
           <Tab label="Structure" active={view === "structure"} onClick={openStructure} />

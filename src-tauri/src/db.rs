@@ -191,6 +191,84 @@ pub async fn db_table_data(
     }
 }
 
+/// List every database on the connected server (template DBs excluded for
+/// Postgres). Lets the user browse and switch databases without re-entering
+/// connection details.
+#[tauri::command]
+pub async fn db_list_databases(
+    state: tauri::State<'_, DbState>,
+    id: String,
+) -> Result<Vec<String>, String> {
+    match get(&state, &id)? {
+        Db::Pg(pool) => {
+            let rows = sqlx::query(
+                "SELECT datname FROM pg_database \
+                 WHERE datistemplate = false ORDER BY datname",
+            )
+            .fetch_all(&pool)
+            .await
+            .map_err(err)?;
+            Ok(rows.iter().filter_map(|r| r.try_get::<String, _>(0).ok()).collect())
+        }
+        Db::My(pool) => {
+            let rows = sqlx::query("SHOW DATABASES").fetch_all(&pool).await.map_err(err)?;
+            // SHOW DATABASES yields the binary-charset string column seen across
+            // the MySQL catalog, so decode it the same forgiving way.
+            Ok(rows.iter().filter_map(|r| my_string(r, 0)).collect())
+        }
+    }
+}
+
+/// `CREATE DATABASE <name>`. The name can't be bound as a parameter in DDL, so
+/// it's escaped per-dialect (double quotes for Postgres, backticks for MySQL).
+#[tauri::command]
+pub async fn db_create_database(
+    state: tauri::State<'_, DbState>,
+    id: String,
+    name: String,
+) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Database name is required".to_string());
+    }
+    match get(&state, &id)? {
+        Db::Pg(pool) => {
+            let q = format!("CREATE DATABASE \"{}\"", name.replace('"', "\"\""));
+            sqlx::query(&q).execute(&pool).await.map_err(err)?;
+        }
+        Db::My(pool) => {
+            let q = format!("CREATE DATABASE `{}`", name.replace('`', "``"));
+            sqlx::query(&q).execute(&pool).await.map_err(err)?;
+        }
+    }
+    Ok(())
+}
+
+/// `DROP DATABASE <name>`. The engine rejects dropping a database that has open
+/// connections (including the active one), and that error surfaces to the UI.
+#[tauri::command]
+pub async fn db_drop_database(
+    state: tauri::State<'_, DbState>,
+    id: String,
+    name: String,
+) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Database name is required".to_string());
+    }
+    match get(&state, &id)? {
+        Db::Pg(pool) => {
+            let q = format!("DROP DATABASE \"{}\"", name.replace('"', "\"\""));
+            sqlx::query(&q).execute(&pool).await.map_err(err)?;
+        }
+        Db::My(pool) => {
+            let q = format!("DROP DATABASE `{}`", name.replace('`', "``"));
+            sqlx::query(&q).execute(&pool).await.map_err(err)?;
+        }
+    }
+    Ok(())
+}
+
 async fn run_pg(pool: &sqlx::PgPool, sql: &str) -> Result<QueryResult, String> {
     let rows = sqlx::query(sql).fetch_all(pool).await.map_err(err)?;
     let columns: Vec<String> = rows
