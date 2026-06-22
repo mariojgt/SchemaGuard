@@ -2,6 +2,7 @@ import type {
   CanonicalType,
   Column,
   DefaultValue,
+  Index,
   ReferentialAction,
   Schema,
   Table,
@@ -12,38 +13,176 @@ export interface SqlParseResult {
   warnings: string[];
 }
 
-/** Parse raw SQL DDL (CREATE TABLE statements) into the Schema IR. */
+/**
+ * Parse raw SQL DDL into the Schema IR. Handles hand-written DDL as well as
+ * real database dumps (`mysqldump`, `pg_dump`): line/block comments are
+ * stripped, foreign keys and indexes declared in standalone `ALTER TABLE` /
+ * `CREATE INDEX` statements are merged back onto their table, and non-DDL noise
+ * (INSERT data, SET, GRANT, COMMENT, sequences…) is ignored.
+ */
 export function parseSql(source: string): SqlParseResult {
   const warnings: string[] = [];
   const tables: Table[] = [];
+  const byName = new Map<string, Table>();
 
-  for (const { name, body } of createTableBlocks(source)) {
-    const table: Table = { name, columns: [], indexes: [], foreignKeys: [] };
-    for (const item of splitTopLevel(body)) {
-      parseItem(item.trim(), table, warnings);
+  for (const raw of splitStatements(stripComments(source))) {
+    const stmt = raw.trim();
+    if (stmt.length === 0) continue;
+
+    if (/^create\s+(?:temporary\s+|temp\s+|unlogged\s+)?table\b/i.test(stmt)) {
+      const table = parseCreateTable(stmt, warnings);
+      if (table) {
+        tables.push(table);
+        byName.set(table.name, table);
+      }
+    } else if (/^alter\s+table\b/i.test(stmt)) {
+      applyAlterTable(stmt, byName, warnings);
+    } else if (/^create\s+(?:unique\s+)?index\b/i.test(stmt)) {
+      applyCreateIndex(stmt, byName, warnings);
     }
-    tables.push(table);
+    // Anything else (INSERT, SET, CREATE SEQUENCE, COMMENT, GRANT…) is ignored.
   }
 
   return { schema: { name: "Imported", tables }, warnings };
 }
 
-interface Block {
-  name: string;
-  body: string;
+/** Remove `-- …` / `# …` line comments and `/* … */` blocks, quote-aware. */
+function stripComments(src: string): string {
+  let out = "";
+  let quote: string | null = null;
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    const next = src[i + 1];
+    if (quote) {
+      out += ch;
+      if (ch.charCodeAt(0) === 92 && quote !== "`" && next !== undefined) {
+        out += next;
+        i++;
+      } else if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      quote = ch;
+      out += ch;
+      continue;
+    }
+    if ((ch === "-" && next === "-") || ch === "#") {
+      while (i < src.length && src[i] !== "\n") i++;
+      out += "\n";
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      i += 2;
+      while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) i++;
+      i++; // skip the closing "*", loop's i++ skips "/"
+      out += " ";
+      continue;
+    }
+    out += ch;
+  }
+  return out;
 }
 
-function createTableBlocks(src: string): Block[] {
-  const blocks: Block[] = [];
-  const re = /create\s+table\s+(?:if\s+not\s+exists\s+)?([^\s(]+)\s*\(/gi;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(src)) !== null) {
-    const name = cleanIdent(m[1] ?? "");
-    const openIndex = m.index + m[0].length - 1; // m[0] ends with "("
-    const body = balancedParens(src, openIndex);
-    if (body !== null) blocks.push({ name, body });
+/** Split into statements on top-level `;` (outside quotes and parentheses). */
+function splitStatements(src: string): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (quote) {
+      cur += ch;
+      if (ch.charCodeAt(0) === 92 && quote !== "`" && i + 1 < src.length) {
+        cur += src[i + 1];
+        i++;
+      } else if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === "`") {
+      quote = ch;
+      cur += ch;
+      continue;
+    }
+    if (ch === "(") depth++;
+    else if (ch === ")") depth--;
+    if (ch === ";" && depth === 0) {
+      if (cur.trim().length > 0) out.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += ch;
   }
-  return blocks;
+  if (cur.trim().length > 0) out.push(cur);
+  return out;
+}
+
+/** Parse a single `CREATE TABLE name (…)` statement into a table. */
+function parseCreateTable(stmt: string, warnings: string[]): Table | null {
+  const m = /create\s+(?:temporary\s+|temp\s+|unlogged\s+)?table\s+(?:if\s+not\s+exists\s+)?([^\s(]+)\s*\(/i.exec(
+    stmt,
+  );
+  if (!m) return null;
+  const name = cleanIdent(m[1] ?? "");
+  const openIndex = m.index + m[0].length - 1; // m[0] ends with "("
+  const body = balancedParens(stmt, openIndex);
+  if (body === null) return null;
+  const table: Table = { name, columns: [], indexes: [], foreignKeys: [] };
+  for (const item of splitTopLevel(body)) {
+    parseItem(item.trim(), table, warnings);
+  }
+  return table;
+}
+
+/** Merge a standalone `ALTER TABLE … ADD …` statement onto its table. */
+function applyAlterTable(stmt: string, byName: Map<string, Table>, warnings: string[]): void {
+  const m =
+    /^alter\s+table\s+(?:only\s+)?(?:if\s+exists\s+)?("[^"]+"|`[^`]+`|[^\s(]+)([\s\S]*)$/i.exec(
+      stmt,
+    );
+  if (!m) return;
+  const name = cleanIdent(m[1] ?? "");
+  const table = byName.get(name);
+  if (!table) {
+    warnings.push(`ALTER TABLE on unknown table "${name}" — skipped.`);
+    return;
+  }
+  for (const clause of splitTopLevel(m[2] ?? "")) {
+    const add = /^\s*add\s+(?:column\s+)?([\s\S]+)$/i.exec(clause);
+    if (!add) continue; // DROP / MODIFY / ALTER COLUMN / OWNER TO / … — not modelled
+    parseItem((add[1] ?? "").trim(), table, warnings);
+  }
+}
+
+/** Merge a standalone `CREATE [UNIQUE] INDEX … ON table (…)` onto its table. */
+function applyCreateIndex(stmt: string, byName: Map<string, Table>, warnings: string[]): void {
+  const head =
+    /^create\s+(unique\s+)?index\s+(?:concurrently\s+)?(?:if\s+not\s+exists\s+)?(?:("[^"]+"|`[^`]+`|[\w.]+)\s+)?on\s+(?:only\s+)?("[^"]+"|`[^`]+`|[\w.]+)/i.exec(
+      stmt,
+    );
+  if (!head) return;
+  const tableName = cleanIdent(head[3] ?? "");
+  const table = byName.get(tableName);
+  if (!table) {
+    warnings.push(`CREATE INDEX on unknown table "${tableName}" — skipped.`);
+    return;
+  }
+  const open = stmt.indexOf("(", head.index + head[0].length);
+  if (open < 0) return;
+  const inner = balancedParens(stmt, open);
+  if (inner === null) return;
+  const cols = inner
+    .split(",")
+    .map((p) => cleanIdent(p.trim().split(/\s+/)[0] ?? ""))
+    .filter((c) => c.length > 0 && !c.includes("(")); // skip expression indexes
+  if (cols.length === 0) return;
+  const index: Index = { columns: cols, unique: Boolean(head[1]) };
+  if (head[2]) index.name = cleanIdent(head[2]);
+  table.indexes.push(index);
 }
 
 function balancedParens(src: string, openIndex: number): string | null {
@@ -121,6 +260,16 @@ function parseForeignKey(item: string, table: Table): void {
   });
 }
 
+/** Record a (possibly named) table-level index. */
+function pushIndex(item: string, table: Table, unique: boolean): void {
+  const cols = colsInParens(item);
+  if (cols.length === 0) return;
+  const index: Index = { columns: cols, unique };
+  const named = /\b(?:key|index)\s+("[^"]+"|`[^`]+`|\w+)\s*\(/i.exec(item);
+  if (named?.[1]) index.name = cleanIdent(named[1]);
+  table.indexes.push(index);
+}
+
 function parseItem(item: string, table: Table, warnings: string[]): void {
   const upper = item.toUpperCase();
 
@@ -139,15 +288,19 @@ function parseItem(item: string, table: Table, warnings: string[]): void {
     return;
   }
   if (upper.startsWith("UNIQUE")) {
-    table.indexes.push({ columns: colsInParens(item), unique: true });
+    pushIndex(item, table, true);
     return;
   }
   if (
     upper.startsWith("KEY ") ||
     upper.startsWith("INDEX ") ||
-    upper.startsWith("CHECK") ||
-    upper.startsWith("PRIMARY KEY(")
+    upper.startsWith("FULLTEXT") ||
+    upper.startsWith("SPATIAL")
   ) {
+    pushIndex(item, table, false);
+    return;
+  }
+  if (upper.startsWith("CHECK")) {
     return; // not modelled in the IR yet
   }
 
