@@ -1,0 +1,188 @@
+{
+  "version": 1,
+  "name": "SchemaGuard",
+  "framework": "node",
+  "apps": [
+    {
+      "id": "root",
+      "name": "SchemaGuard",
+      "path": ".",
+      "role": null,
+      "framework": "node",
+      "envTemplate": null,
+      "isolation": {
+        "profile": "node_basic",
+        "appPort": true,
+        "hmrPort": true,
+        "envTemplate": null,
+        "database": {
+          "mode": "none",
+          "nameTemplate": null
+        },
+        "redis": {
+          "mode": "none",
+          "prefixTemplate": null
+        },
+        "queue": {
+          "mode": "none",
+          "nameTemplate": null
+        },
+        "storage": {
+          "mode": "none",
+          "pathTemplate": null
+        }
+      },
+      "commands": {
+        "setup": [
+          "pnpm install"
+        ],
+        "migrate": [],
+        "dev": [
+          "pnpm dev -- --host 127.0.0.1 --port {{app_port}}"
+        ],
+        "test": [
+          "pnpm test"
+        ],
+        "stop": []
+      },
+      "env": {
+        "VITE_PORT": "{{app_port}}"
+      },
+      "port": true
+    },
+    {
+      "id": "packages_core",
+      "name": "core",
+      "path": "packages/core",
+      "role": null,
+      "framework": "node",
+      "envTemplate": null,
+      "isolation": {
+        "profile": "node_basic",
+        "appPort": true,
+        "hmrPort": true,
+        "envTemplate": null,
+        "database": {
+          "mode": "none",
+          "nameTemplate": null
+        },
+        "redis": {
+          "mode": "none",
+          "prefixTemplate": null
+        },
+        "queue": {
+          "mode": "none",
+          "nameTemplate": null
+        },
+        "storage": {
+          "mode": "none",
+          "pathTemplate": null
+        }
+      },
+      "commands": {
+        "setup": [
+          "npm install"
+        ],
+        "migrate": [],
+        "dev": [],
+        "test": [
+          "npm run test"
+        ],
+        "stop": []
+      },
+      "env": {
+        "VITE_PORT": "{{app_port}}"
+      },
+      "port": true
+    },
+    {
+      "id": "packages_mcp",
+      "name": "mcp",
+      "path": "packages/mcp",
+      "role": null,
+      "framework": "node",
+      "envTemplate": null,
+      "isolation": {
+        "profile": "node_basic",
+        "appPort": true,
+        "hmrPort": false,
+        "envTemplate": null,
+        "database": {
+          "mode": "none",
+          "nameTemplate": null
+        },
+        "redis": {
+          "mode": "none",
+          "prefixTemplate": null
+        },
+        "queue": {
+          "mode": "none",
+          "nameTemplate": null
+        },
+        "storage": {
+          "mode": "none",
+          "pathTemplate": null
+        }
+      },
+      "commands": {
+        "setup": [
+          "npm install"
+        ],
+        "migrate": [],
+        "dev": [],
+        "test": [],
+        "stop": []
+      },
+      "env": {},
+      "port": true
+    }
+  ],
+  "isolation": {
+    "profile": "node_basic",
+    "appPort": true,
+    "hmrPort": true,
+    "envTemplate": null,
+    "database": {
+      "mode": "none",
+      "nameTemplate": null
+    },
+    "redis": {
+      "mode": "none",
+      "prefixTemplate": null
+    },
+    "queue": {
+      "mode": "none",
+      "nameTemplate": null
+    },
+    "storage": {
+      "mode": "none",
+      "pathTemplate": null
+    }
+  },
+  "commands": {
+    "setup": [
+      "pnpm install"
+    ],
+    "migrate": [],
+    "dev": [
+      "pnpm dev -- --host 127.0.0.1 --port {{app_port}}"
+    ],
+    "test": [
+      "pnpm test"
+    ],
+    "stop": []
+  },
+  "env": {},
+  "hooks": {
+    "onCreate": [],
+    "preDev": [],
+    "onDestroy": [],
+    "autostartDev": true
+  },
+  "summary": [
+    "Files run in one git worktree per session.",
+    "Each session gets its own app port.",
+    "Vite/HMR gets a separate port when Vite is detected."
+  ],
+  "warnings": []
+}
