@@ -1,29 +1,21 @@
-import type { CanonicalType, Schema, Table } from "@schemaguard/core";
+import type { Schema } from "@schemaguard/core";
 import {
-  AlertTriangle,
-  Check,
   ChevronLeft,
   ChevronRight,
   Copy,
   Database,
   Download,
   Equal,
-  FileText,
   Filter,
   GitBranch,
   GitCompare,
   Hash,
-  KeyRound,
-  ListTree,
-  Loader2,
-  Pencil,
   Play,
   Plug,
   PlugZap,
   Plus,
   RefreshCw,
   Search,
-  ShieldOff,
   Table2,
   Trash2,
   Upload,
@@ -50,28 +42,35 @@ import {
   dbDisconnect,
   dbDropTables,
   dbExecute,
-  dbImportBegin,
-  dbImportExec,
-  dbImportFinish,
   dbQuery,
   dbTableData,
   dbTables,
   isDesktop,
 } from "../lib/db";
-import { prettyMaybeJson, rowToJson, toCsv, toJson, toSqlInserts } from "../lib/exportData";
+import { rowToJson, toCsv, toJson, toSqlInserts } from "../lib/exportData";
 import { fetchPrimaryKey, introspectSchema } from "../lib/introspect";
 import { downloadText } from "../lib/projectFile";
-import { extractStatements, flushStatements } from "../lib/sqlSplit";
+import type { DestructiveFinding } from "../lib/sqlGuard";
+import { scanDestructive } from "../lib/sqlGuard";
 import { useConnections } from "../stores/connections";
 import { useSchemaStore } from "../stores/schema";
 import { toast } from "../stores/toasts";
 import { useUi } from "../stores/ui";
+import { ConfirmDialog } from "./ConfirmDialog";
 import type { MenuItem } from "./ContextMenu";
 import { ContextMenu } from "./ContextMenu";
+import { CellDetail } from "./database/CellDetail";
+import { GRADIENT } from "./database/constants";
+import { CreateDatabaseDialog } from "./database/CreateDatabaseDialog";
+import { DropTablesDialog } from "./database/DropTablesDialog";
+import { ImportSqlDialog } from "./database/ImportSqlDialog";
+import { InsertRow } from "./database/InsertRow";
+import { Field, Tab } from "./database/parts";
+import { ResultGrid } from "./database/ResultGrid";
+import { StructureView } from "./database/StructureView";
 import { DiffDialog } from "./DiffDialog";
 import { SchemaDiagram } from "./SchemaDiagram";
 
-const GRADIENT = "linear-gradient(135deg,#ff3fa4,#a64bff)";
 const PAGE = 100;
 
 // DDL that changes the set/shape of tables — used to auto-refresh the sidebar
@@ -158,6 +157,8 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
   const designSchema = useSchemaStore((s) => s.schema);
   const [compareOpen, setCompareOpen] = useState(false);
   const [comparing, setComparing] = useState(false);
+  // Pre-flight guard: destructive/locking SQL is intercepted before it runs.
+  const [guard, setGuard] = useState<{ sql: string; findings: DestructiveFinding[] } | null>(null);
 
   const [result, setResult] = useState<QueryResult | null>(null);
   const [resultError, setResultError] = useState<string | null>(null);
@@ -722,12 +723,25 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
       });
   };
 
+  // The guard loop's pre-flight: scan the SQL before it touches the live
+  // database. Destructive/locking statements open a confirm; everything else
+  // (SELECTs, scoped writes, safe DDL) runs straight through with no friction.
+  const requestRun = (sql: string) => {
+    if (!connId) return;
+    const findings = scanDestructive(sql);
+    if (findings.length > 0) {
+      setGuard({ sql, findings });
+      return;
+    }
+    runQuery(sql);
+  };
+
   // Run the highlighted text if the user has a selection, else the whole editor
   // (Beekeeper "Run selection"). Lets you keep several statements and run one.
   const runQueryOrSelection = () => {
     const el = queryRef.current;
     const sel = el ? el.value.slice(el.selectionStart, el.selectionEnd).trim() : "";
-    runQuery(sel.length > 0 ? sel : query);
+    requestRun(sel.length > 0 ? sel : query);
   };
 
   // Drop a generated query into the Query tab and run it — the heart of the
@@ -736,7 +750,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
     setQuery(sql);
     setView("query");
     setSelected(null);
-    runQuery(sql);
+    requestRun(sql);
   };
 
   // A query the assistant handed off via "Run in Database". Once connected,
@@ -892,11 +906,11 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
             >
               <Database size={15} />
             </span>
-            <div className="text-[15px] font-bold">Connect to a database</div>
+            <div className="text-balance text-[15px] font-bold">Connect to a database</div>
           </div>
 
           {!desktop && (
-            <p className="mb-4 rounded-lg border border-med/30 bg-med/10 px-3 py-2 text-[11.5px] text-med">
+            <p className="mb-4 text-pretty rounded-lg border border-med/30 bg-med/10 px-3 py-2 text-[11.5px] text-med">
               Live connections run through the native backend. Launch the desktop app (
               <span className="font-mono">pnpm tauri:dev</span>) to connect — the browser preview
               can't open database sockets.
@@ -1001,7 +1015,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
               const { name, ...info } = form;
               connect({ ...info, database: info.database.trim(), host: info.host.trim() }, name);
             }}
-            className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-lg py-2.5 text-[13px] font-semibold text-white shadow-glow disabled:opacity-40 disabled:shadow-none"
+            className="press mt-4 inline-flex w-full items-center justify-center gap-2 rounded-lg py-2.5 text-[13px] font-semibold text-white shadow-glow disabled:opacity-40 disabled:shadow-none"
             style={{ background: GRADIENT }}
           >
             <Plug size={15} />
@@ -1017,7 +1031,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                 {saved.map((c) => (
                   <div
                     key={c.id}
-                    className="group flex items-center gap-2 rounded-lg border border-line bg-panel2 px-3 py-2 hover:border-line2"
+                    className="group flex items-center gap-2 rounded-lg border border-line bg-panel2 px-3 py-2 transition-colors hover:border-line2"
                   >
                     <button
                       type="button"
@@ -1105,7 +1119,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
               }}
               disabled={connecting}
               title="Create a new database on this server"
-              className="inline-flex items-center gap-1 rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] text-dim hover:border-acc/50 hover:text-acc disabled:opacity-50"
+              className="press inline-flex items-center gap-1 rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] text-dim hover:border-acc/50 hover:text-acc disabled:opacity-50"
             >
               <Plus size={13} />
               New DB
@@ -1124,7 +1138,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
             setImportSqlOpen(true);
           }}
           title="Run a .sql file (schema + data) against this database"
-          className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12px] hover:border-acc/50 hover:text-acc"
+          className="press ml-auto inline-flex items-center gap-1.5 rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12px] hover:border-acc/50 hover:text-acc"
         >
           <Upload size={14} />
           Import SQL
@@ -1134,7 +1148,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
           onClick={compareWithDesign}
           disabled={comparing}
           title="Diff your canvas design against this live database"
-          className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12px] hover:border-acc/50 hover:text-acc disabled:opacity-40"
+          className="press inline-flex items-center gap-1.5 rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12px] hover:border-acc/50 hover:text-acc disabled:opacity-40"
         >
           <GitCompare size={14} />
           {comparing ? "Comparing…" : "Compare with design"}
@@ -1144,7 +1158,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
           onClick={importToDiagram}
           disabled={importing}
           title="Reverse-engineer this database into a diagram"
-          className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-semibold text-white shadow-glow disabled:opacity-40"
+          className="press inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-semibold text-white shadow-glow disabled:opacity-40"
           style={{ background: GRADIENT }}
         >
           <GitBranch size={14} />
@@ -1153,7 +1167,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
         <button
           type="button"
           onClick={disconnect}
-          className="rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12px] hover:border-high/50 hover:text-high"
+          className="press rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12px] hover:border-high/50 hover:text-high"
         >
           Disconnect
         </button>
@@ -1193,7 +1207,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                 }}
                 disabled={refreshing}
                 title="Refresh table list"
-                className="ml-auto grid h-5 w-5 place-items-center rounded text-faint hover:bg-panel2 hover:text-ink disabled:opacity-50"
+                className="relative ml-auto grid h-5 w-5 place-items-center rounded text-faint after:absolute after:left-1/2 after:top-1/2 after:size-9 after:-translate-x-1/2 after:-translate-y-1/2 hover:bg-panel2 hover:text-ink disabled:opacity-50"
               >
                 <RefreshCw size={12} className={refreshing ? "animate-spin" : ""} />
               </button>
@@ -1237,7 +1251,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
               </div>
             )}
             {tables.length === 0 && (
-              <p className="px-2 py-2 text-[11px] leading-snug text-med">
+              <p className="text-pretty px-2 py-2 text-[11px] leading-snug text-med">
                 No tables in the selected database. The{" "}
                 <span className="font-semibold">Database</span> field is probably empty or wrong —
                 disconnect and set it (e.g. your schema name). Run{" "}
@@ -1251,7 +1265,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
               return (
                 <div
                   key={t}
-                  className={`flex items-center gap-1.5 rounded-md px-2 py-1.5 ${
+                  className={`flex items-center gap-1.5 rounded-md px-2 py-1.5 transition-colors ${
                     active ? "bg-acc/15" : checked ? "bg-panel2" : "hover:bg-panel2"
                   }`}
                 >
@@ -1317,7 +1331,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                         exportResult(fmt);
                       }}
                       disabled={!result || result.rows.length === 0}
-                      className="rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] uppercase hover:border-line2 disabled:opacity-40"
+                      className="press rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] uppercase hover:border-line2 disabled:opacity-40"
                     >
                       {fmt}
                     </button>
@@ -1343,7 +1357,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                   <button
                     type="button"
                     onClick={runQueryOrSelection}
-                    className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-[12.5px] font-semibold text-white shadow-glow"
+                    className="press inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-[12.5px] font-semibold text-white shadow-glow"
                     style={{ background: GRADIENT }}
                   >
                     <Play size={14} />
@@ -1391,7 +1405,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                   onClick={() => {
                     setInserting((v) => !v);
                   }}
-                  className={`ml-auto inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11.5px] ${
+                  className={`press ml-auto inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11.5px] ${
                     inserting
                       ? "border-acc/40 bg-acc/15 text-acc"
                       : "border-line bg-panel2 hover:border-line2"
@@ -1407,7 +1421,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                       setExportOpen((v) => !v);
                     }}
                     disabled={!result || result.rows.length === 0}
-                    className="inline-flex items-center gap-1 rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] hover:border-line2 disabled:opacity-40"
+                    className="press inline-flex items-center gap-1 rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] hover:border-line2 disabled:opacity-40"
                   >
                     <Download size={13} />
                     Export
@@ -1444,7 +1458,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                     </div>
                   )}
                 </div>
-                <span>
+                <span className="tabular-nums">
                   rows {offset + 1}–{offset + (result?.rows.length ?? 0)}
                   {rowCount !== null && <span className="text-faint"> of {rowCount}</span>}
                 </span>
@@ -1559,6 +1573,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
       {dropOpen && (
         <DropTablesDialog
           tables={[...selectedTables]}
+          designTables={designSchema.tables.map((t) => t.name)}
           dialect={connDialect}
           dropping={dropping}
           onCancel={() => {
@@ -1605,1070 +1620,46 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
           }}
         />
       )}
-    </div>
-  );
-}
 
-// Read this many bytes per slice. The whole file is never held in memory — we
-// stream slices, split off complete statements, and send them in batches.
-const IMPORT_CHUNK = 4 * 1024 * 1024;
-const IMPORT_BATCH = 400;
-
-// Per-dialect session statements to suspend / restore foreign-key enforcement
-// for the duration of an import (mysqldump-style), so dumps restore regardless
-// of statement order. Postgres uses session_replication_role (needs elevated
-// rights — applied best-effort).
-const FK_OFF: Record<DbDialect, string> = {
-  mysql: "SET FOREIGN_KEY_CHECKS=0",
-  postgres: "SET session_replication_role = replica",
-};
-const FK_ON: Record<DbDialect, string> = {
-  mysql: "SET FOREIGN_KEY_CHECKS=1",
-  postgres: "SET session_replication_role = origin",
-};
-
-/**
- * phpMyAdmin-style import: pick a .sql file and run it against the database.
- * The file is streamed in chunks so dumps of any size import without loading
- * the whole script into memory or sending it across the bridge at once.
- */
-function ImportSqlDialog({
-  connId,
-  database,
-  dialect,
-  tableCount,
-  onClose,
-  onDone,
-}: {
-  connId: string;
-  database: string;
-  dialect: DbDialect;
-  tableCount: number;
-  onClose: () => void;
-  onDone: () => void;
-}) {
-  const [file, setFile] = useState<File | null>(null);
-  const [running, setRunning] = useState(false);
-  const [progress, setProgress] = useState(0);
-  // Opt-in: wipe the database before importing so a full dump restores cleanly
-  // (avoids "table already exists" / 1050 on re-import).
-  const [emptyFirst, setEmptyFirst] = useState(false);
-  const [emptying, setEmptying] = useState(false);
-  // On by default: disable FK checks for the import session so a full dump
-  // restores regardless of table/row order (avoids 1452). Re-enabled at the end.
-  const [disableFk, setDisableFk] = useState(true);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  const run = async () => {
-    if (!file) return;
-    setRunning(true);
-    setProgress(0);
-    let importId: string | null = null;
-    try {
-      // Drop every existing table first when requested. FK checks are disabled
-      // so tables referenced by others still drop; this runs before the import
-      // session opens, and DDL auto-commits, so the import sees a clean schema.
-      if (emptyFirst) {
-        setEmptying(true);
-        const existing = await dbTables(connId);
-        if (existing.length > 0) await dbDropTables(connId, existing, true);
-        setEmptying(false);
-      }
-      importId = await dbImportBegin(connId);
-      // Turn off FK enforcement for this one import connection so a full dump
-      // restores regardless of statement/row order. Best-effort: on Postgres
-      // this needs elevated rights, so a failure just leaves checks on.
-      if (disableFk) {
-        await dbImportExec(importId, [FK_OFF[dialect]]).catch(() => undefined);
-      }
-      let offset = 0;
-      let buffer = "";
-      let totalRows = 0;
-      let pending: string[] = [];
-      const flush = async () => {
-        if (pending.length === 0) return;
-        totalRows += await dbImportExec(importId as string, pending);
-        pending = [];
-      };
-      while (offset < file.size) {
-        const text = await file.slice(offset, offset + IMPORT_CHUNK).text();
-        offset += IMPORT_CHUNK;
-        buffer += text;
-        const { statements, rest } = extractStatements(buffer);
-        buffer = rest;
-        for (const s of statements) {
-          pending.push(s);
-          if (pending.length >= IMPORT_BATCH) await flush();
-        }
-        await flush();
-        setProgress(Math.min(100, Math.round((offset / file.size) * 100)));
-      }
-      // Emit any final statement that lacked a trailing semicolon.
-      for (const s of flushStatements(buffer)) pending.push(s);
-      await flush();
-
-      toast.success(`Imported “${file.name}” · ${String(totalRows)} row(s) affected.`);
-      onDone();
-      onClose();
-    } catch (e: unknown) {
-      toast.error(`Import failed: ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      if (importId) {
-        // Restore FK enforcement before the connection returns to the pool so
-        // the disabled setting never leaks into later queries. (Re-enabling
-        // doesn't re-validate the rows just imported, so it can't error.)
-        if (disableFk) await dbImportExec(importId, [FK_ON[dialect]]).catch(() => undefined);
-        await dbImportFinish(importId).catch(() => undefined);
-      }
-      setEmptying(false);
-      setRunning(false);
-    }
-  };
-
-  const sizeLabel = (n: number): string =>
-    n < 1024
-      ? `${String(n)} B`
-      : n < 1024 * 1024
-        ? `${(n / 1024).toFixed(1)} KB`
-        : `${(n / 1024 / 1024).toFixed(1)} MB`;
-
-  return (
-    <div
-      className="fixed inset-0 z-[55] grid animate-fade place-items-center bg-black/60 p-6 backdrop-blur-sm"
-      onClick={() => {
-        if (!running) onClose();
-      }}
-    >
-      <div
-        className="glass-strong flex w-[460px] max-w-full animate-pop flex-col overflow-hidden rounded-xl border border-line/70 shadow-2xl"
-        onClick={(e) => {
-          e.stopPropagation();
-        }}
-      >
-        <div className="flex flex-none items-center gap-2 border-b border-line px-4 py-3">
-          <span
-            className="grid h-[18px] w-[18px] place-items-center rounded text-white"
-            style={{ background: GRADIENT }}
-          >
-            <Upload size={11} />
-          </span>
-          <span className="text-[14px] font-bold">Import SQL</span>
-          <span className="font-mono text-[11px] text-faint">→ {database}</span>
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={running}
-            className="ml-auto grid place-items-center text-faint hover:text-ink disabled:opacity-40"
-          >
-            <X size={15} />
-          </button>
-        </div>
-
-        <div className="min-h-0 flex-1 overflow-auto p-4">
-          <input
-            ref={inputRef}
-            type="file"
-            accept=".sql,.txt,application/sql,text/plain"
-            className="hidden"
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) setFile(f);
-            }}
-          />
-          <button
-            type="button"
-            onClick={() => inputRef.current?.click()}
-            disabled={running}
-            className="flex w-full items-center gap-2 rounded-lg border border-dashed border-line2 bg-panel2 px-3 py-3 text-left hover:border-acc/60 disabled:opacity-50"
-          >
-            <FileText size={16} className="flex-none text-acc" />
-            {file ? (
-              <span className="min-w-0">
-                <span className="block truncate text-[12.5px] font-semibold">{file.name}</span>
-                <span className="text-[11px] text-faint">
-                  {sizeLabel(file.size)} · click to change
-                </span>
-              </span>
-            ) : (
-              <span className="text-[12.5px] text-dim">Choose a .sql file…</span>
-            )}
-          </button>
-
-          <div className="mt-3 flex items-start gap-2 rounded-lg border border-med/30 bg-med/10 px-3 py-2 text-[11.5px] text-med">
-            <AlertTriangle size={14} className="mt-0.5 flex-none" />
-            <span>
-              Statements run directly against <span className="font-semibold">{database}</span>. This
-              can create, modify, or overwrite data and isn&apos;t undoable.
-            </span>
-          </div>
-
-          <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12px]">
-            <input
-              type="checkbox"
-              checked={emptyFirst}
-              disabled={running}
-              onChange={(e) => {
-                setEmptyFirst(e.target.checked);
-              }}
-              className="mt-0.5 h-3.5 w-3.5 accent-[#a64bff]"
-            />
-            <span>
-              <span className="inline-flex items-center gap-1 font-semibold text-ink">
-                <ShieldOff size={12} className="text-high" />
-                Drop existing tables first
-              </span>
-              <span className="mt-0.5 block text-[11px] text-faint">
-                {tableCount > 0
-                  ? `Permanently deletes all ${String(tableCount)} table${tableCount === 1 ? "" : "s"} in ${database} before importing, so a full dump restores without "already exists" errors.`
-                  : `${database} is already empty — the dump will import as-is.`}
-              </span>
-            </span>
-          </label>
-
-          <label className="mt-2 flex cursor-pointer items-start gap-2 text-[12px]">
-            <input
-              type="checkbox"
-              checked={disableFk}
-              disabled={running}
-              onChange={(e) => {
-                setDisableFk(e.target.checked);
-              }}
-              className="mt-0.5 h-3.5 w-3.5 accent-[#a64bff]"
-            />
-            <span>
-              <span className="inline-flex items-center gap-1 font-semibold text-ink">
-                <ShieldOff size={12} className="text-med" />
-                Disable foreign-key checks during import
-              </span>
-              <span className="mt-0.5 block text-[11px] text-faint">
-                Recommended for full dumps — lets tables and rows load in any order without
-                constraint errors (1452). Re-enabled automatically when the import finishes.
-              </span>
-            </span>
-          </label>
-
-          {running && (
-            <div className="mt-3">
-              <div className="mb-1 flex items-center justify-between text-[11px] text-dim">
-                <span>{emptying ? "Emptying database…" : "Streaming & importing…"}</span>
-                <span className="font-mono tabular-nums">{progress}%</span>
-              </div>
-              <div className="h-1.5 overflow-hidden rounded-full bg-panel">
-                <div
-                  className="h-full rounded-full bg-acc transition-all"
-                  style={{ width: `${String(progress)}%` }}
-                />
-              </div>
-            </div>
-          )}
-        </div>
-
-        <div className="flex flex-none items-center justify-end gap-2 border-t border-line px-4 py-3">
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={running}
-            className="rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12.5px] disabled:opacity-40"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              void run();
-            }}
-            disabled={!file || running}
-            className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12.5px] font-semibold text-white shadow-glow disabled:opacity-40 disabled:shadow-none"
-            style={{ background: GRADIENT }}
-          >
-            {running ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
-            {emptying ? "Emptying…" : running ? "Importing…" : "Import"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/** Name and create a new database on the connected server, then switch to it. */
-function CreateDatabaseDialog({
-  dialect,
-  creating,
-  existing,
-  onCancel,
-  onCreate,
-}: {
-  dialect: DbDialect;
-  creating: boolean;
-  existing: string[];
-  onCancel: () => void;
-  onCreate: (name: string) => void;
-}) {
-  const [name, setName] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
-  const trimmed = name.trim();
-  const duplicate = existing.some((d) => d.toLowerCase() === trimmed.toLowerCase());
-  const canCreate = trimmed.length > 0 && !duplicate && !creating;
-  const submit = () => {
-    if (canCreate) onCreate(trimmed);
-  };
-
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
-
-  return (
-    <div
-      className="fixed inset-0 z-[55] grid animate-fade place-items-center bg-black/60 p-6 backdrop-blur-sm"
-      onClick={onCancel}
-    >
-      <div
-        className="glass-strong flex w-[440px] max-w-full animate-pop flex-col overflow-hidden rounded-xl border border-line/70 shadow-2xl"
-        onClick={(e) => {
-          e.stopPropagation();
-        }}
-      >
-        <div className="flex flex-none items-center gap-2 border-b border-line px-4 py-3">
-          <span className="grid h-[18px] w-[18px] place-items-center rounded bg-acc/20 text-acc">
-            <Database size={12} />
-          </span>
-          <span className="text-[14px] font-bold">Create database</span>
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={creating}
-            className="ml-auto grid place-items-center text-faint hover:text-ink disabled:opacity-40"
-          >
-            <X size={15} />
-          </button>
-        </div>
-
-        <div className="p-4">
-          <label className="mb-1.5 block text-[11px] font-bold uppercase tracking-wider text-faint">
-            Name
-          </label>
-          <input
-            ref={inputRef}
-            value={name}
-            disabled={creating}
-            placeholder="my_new_database"
-            onChange={(e) => {
-              setName(e.target.value);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") submit();
-            }}
-            className="w-full rounded-lg border border-line bg-panel2 px-2.5 py-2 font-mono text-[12.5px] text-ink outline-none focus:border-acc disabled:opacity-50"
-          />
-          {duplicate ? (
-            <p className="mt-2 text-[11px] text-med">
-              A database named “{trimmed}” already exists.
-            </p>
-          ) : (
-            <p className="mt-2 text-[11px] text-faint">
-              Creates an empty database on this {dialect === "mysql" ? "MySQL" : "PostgreSQL"}{" "}
-              server and switches to it.
-            </p>
-          )}
-        </div>
-
-        <div className="flex flex-none items-center justify-end gap-2 border-t border-line px-4 py-3">
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={creating}
-            className="rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12.5px] disabled:opacity-40"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={submit}
-            disabled={!canCreate}
-            className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12.5px] font-semibold text-white shadow-glow disabled:opacity-40"
-            style={{ background: GRADIENT }}
-          >
-            <Plus size={13} />
-            {creating ? "Creating…" : "Create"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/** Confirm dropping several tables at once, with an opt-in to skip FK checks. */
-function DropTablesDialog({
-  tables,
-  dialect,
-  dropping,
-  onCancel,
-  onDrop,
-}: {
-  tables: string[];
-  dialect: DbDialect;
-  dropping: boolean;
-  onCancel: () => void;
-  onDrop: (disableFk: boolean) => void;
-}) {
-  const [disableFk, setDisableFk] = useState(false);
-  const fkHint =
-    dialect === "mysql"
-      ? "Runs with FOREIGN_KEY_CHECKS = 0 so tables referenced by others still drop."
-      : "Uses DROP TABLE … CASCADE, which also drops dependent foreign keys.";
-
-  return (
-    <div
-      className="fixed inset-0 z-[55] grid animate-fade place-items-center bg-black/60 p-6 backdrop-blur-sm"
-      onClick={onCancel}
-    >
-      <div
-        className="glass-strong flex max-h-[80vh] w-[460px] max-w-full animate-pop flex-col overflow-hidden rounded-xl border border-line/70 shadow-2xl"
-        onClick={(e) => {
-          e.stopPropagation();
-        }}
-      >
-        <div className="flex flex-none items-center gap-2 border-b border-line px-4 py-3">
-          <span className="grid h-[18px] w-[18px] place-items-center rounded bg-crit/20 text-crit">
-            <Trash2 size={12} />
-          </span>
-          <span className="text-[14px] font-bold">
-            Drop {tables.length} table{tables.length === 1 ? "" : "s"}?
-          </span>
-          <button
-            type="button"
-            onClick={onCancel}
-            className="ml-auto grid place-items-center text-faint hover:text-ink"
-          >
-            <X size={15} />
-          </button>
-        </div>
-
-        <div className="min-h-0 flex-1 overflow-auto p-4">
-          <div className="flex items-start gap-2 rounded-lg border border-crit/30 bg-crit/10 px-3 py-2 text-[11.5px] text-crit">
-            <AlertTriangle size={14} className="mt-0.5 flex-none" />
-            <span>This permanently deletes the table(s) and all their data. It can't be undone.</span>
-          </div>
-
-          <div className="mt-3 max-h-40 overflow-auto rounded-lg border border-line bg-panel2 p-2">
-            {tables.map((t) => (
-              <div key={t} className="flex items-center gap-2 py-0.5 font-mono text-[12px]">
-                <Table2 size={12} className="flex-none text-faint" />
-                {t}
-              </div>
-            ))}
-          </div>
-
-          <label className="mt-3 flex cursor-pointer items-start gap-2 text-[12px]">
-            <input
-              type="checkbox"
-              checked={disableFk}
-              disabled={dropping}
-              onChange={(e) => {
-                setDisableFk(e.target.checked);
-              }}
-              className="mt-0.5 h-3.5 w-3.5 accent-[#a64bff]"
-            />
-            <span>
-              <span className="inline-flex items-center gap-1 font-semibold text-ink">
-                <ShieldOff size={12} className="text-med" />
-                Drop without foreign-key checks
-              </span>
-              <span className="mt-0.5 block text-[11px] text-faint">{fkHint}</span>
-            </span>
-          </label>
-        </div>
-
-        <div className="flex flex-none items-center justify-end gap-2 border-t border-line px-4 py-3">
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={dropping}
-            className="rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12.5px] disabled:opacity-40"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              onDrop(disableFk);
-            }}
-            disabled={dropping}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-crit/50 bg-crit/15 px-3 py-1.5 text-[12.5px] font-semibold text-crit hover:bg-crit/25 disabled:opacity-40"
-          >
-            <Trash2 size={13} />
-            {dropping ? "Dropping…" : `Drop ${String(tables.length)}`}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function ResultGrid({
-  result,
-  sort,
-  onSort,
-  pkColumns,
-  onSaveRow,
-  onDeleteRow,
-  onCellMenu,
-  onCellClick,
-}: {
-  result: QueryResult;
-  sort?: { col: string; dir: "asc" | "desc" } | null;
-  onSort?: (col: string) => void;
-  pkColumns?: string[];
-  onSaveRow?: (original: (string | null)[], next: (string | null)[]) => Promise<boolean>;
-  onDeleteRow?: (row: (string | null)[]) => Promise<boolean>;
-  onCellMenu?: (
-    e: React.MouseEvent,
-    column: string,
-    value: string | null,
-    row: (string | null)[],
-  ) => void;
-  onCellClick?: (column: string, value: string | null) => void;
-}) {
-  const editable = !!onSaveRow && (pkColumns?.length ?? 0) > 0;
-  const [editing, setEditing] = useState<number | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
-  const [draft, setDraft] = useState<(string | null)[]>([]);
-  const [saving, setSaving] = useState(false);
-
-  if (result.columns.length === 0) {
-    return (
-      <div className="p-4 text-[12px] text-dim">{result.rowsAffected} row(s). No columns.</div>
-    );
-  }
-
-  const startEdit = (i: number) => {
-    const r = result.rows[i];
-    if (!r) return;
-    setEditing(i);
-    setDraft([...r]);
-  };
-
-  const save = async (original: (string | null)[]) => {
-    if (!onSaveRow) return;
-    setSaving(true);
-    const ok = await onSaveRow(original, draft);
-    setSaving(false);
-    if (ok) setEditing(null);
-  };
-
-  return (
-    <table className="w-full border-collapse text-[12px]">
-      <thead className="sticky top-0">
-        <tr>
-          {editable && <th className="w-px border-b border-line bg-panel2" />}
-          {result.columns.map((c) => (
-            <th
-              key={c}
-              className="border-b border-line bg-panel2 px-3 py-1.5 text-left font-semibold text-dim"
-            >
-              {onSort ? (
-                <button
-                  type="button"
-                  onClick={() => {
-                    onSort(c);
-                  }}
-                  className="inline-flex items-center gap-1 hover:text-ink"
-                  title="Sort by this column"
-                >
-                  {c}
-                  <span className="text-acc">
-                    {sort?.col === c ? (sort.dir === "asc" ? "↑" : "↓") : ""}
-                  </span>
-                </button>
-              ) : (
-                c
-              )}
-            </th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>
-        {result.rows.map((row, i) => {
-          const isEdit = editing === i;
-          return (
-            <tr key={i} className={isEdit ? "bg-acc/5" : "hover:bg-panel2/60"}>
-              {editable && (
-                <td className="border-b border-line/50 px-2 py-1 align-top">
-                  {isEdit ? (
-                    <div className="flex gap-1">
-                      <button
-                        type="button"
-                        title="Save row"
-                        disabled={saving}
-                        onClick={() => {
-                          void save(row);
-                        }}
-                        className="grid h-6 w-6 place-items-center rounded bg-acc/20 text-acc hover:bg-acc/30 disabled:opacity-40"
-                      >
-                        <Check size={13} />
-                      </button>
-                      <button
-                        type="button"
-                        title="Cancel"
-                        disabled={saving}
-                        onClick={() => {
-                          setEditing(null);
-                        }}
-                        className="grid h-6 w-6 place-items-center rounded border border-line hover:border-line2 disabled:opacity-40"
-                      >
-                        <X size={13} />
-                      </button>
-                    </div>
-                  ) : confirmDelete === i ? (
-                    <div className="flex gap-1">
-                      <button
-                        type="button"
-                        title="Confirm delete"
-                        disabled={saving}
-                        onClick={() => {
-                          if (!onDeleteRow) return;
-                          setSaving(true);
-                          void onDeleteRow(row).finally(() => {
-                            setSaving(false);
-                            setConfirmDelete(null);
-                          });
-                        }}
-                        className="grid h-6 w-6 place-items-center rounded bg-crit/20 text-crit hover:bg-crit/30 disabled:opacity-40"
-                      >
-                        <Check size={13} />
-                      </button>
-                      <button
-                        type="button"
-                        title="Cancel"
-                        disabled={saving}
-                        onClick={() => {
-                          setConfirmDelete(null);
-                        }}
-                        className="grid h-6 w-6 place-items-center rounded border border-line hover:border-line2 disabled:opacity-40"
-                      >
-                        <X size={13} />
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="flex gap-0.5">
-                      <button
-                        type="button"
-                        title="Edit row"
-                        onClick={() => {
-                          startEdit(i);
-                        }}
-                        className="grid h-6 w-6 place-items-center rounded text-faint hover:bg-panel2 hover:text-ink"
-                      >
-                        <Pencil size={12} />
-                      </button>
-                      {onDeleteRow && (
-                        <button
-                          type="button"
-                          title="Delete row"
-                          onClick={() => {
-                            setConfirmDelete(i);
-                          }}
-                          className="grid h-6 w-6 place-items-center rounded text-faint hover:bg-crit/15 hover:text-crit"
-                        >
-                          <Trash2 size={12} />
-                        </button>
-                      )}
-                    </div>
-                  )}
-                </td>
-              )}
-              {row.map((cell, j) => (
-                <td
-                  key={j}
-                  onClick={
-                    onCellClick && !isEdit
-                      ? () => {
-                          onCellClick(result.columns[j] ?? "", cell);
-                        }
-                      : undefined
-                  }
-                  onContextMenu={
-                    onCellMenu && !isEdit
-                      ? (e) => {
-                          onCellMenu(e, result.columns[j] ?? "", cell, row);
-                        }
-                      : undefined
-                  }
-                  title={onCellClick && !isEdit ? "Click to view full value" : undefined}
-                  className={`max-w-[360px] border-b border-line/50 px-3 py-1.5 font-mono ${isEdit ? "" : "cursor-pointer truncate"}`}
-                >
-                  {isEdit ? (
-                    <CellEditor
-                      value={draft[j] ?? null}
-                      disabled={saving}
-                      onChange={(v) => {
-                        setDraft((d) => d.map((x, k) => (k === j ? v : x)));
-                      }}
+      {guard && (
+        <ConfirmDialog
+          title="Destructive SQL — run against the live database?"
+          tone="danger"
+          confirmLabel="Run anyway"
+          cancelLabel="Cancel"
+          message={
+            <div className="flex flex-col gap-2">
+              <p className="text-pretty">
+                This {guard.findings.length === 1 ? "statement" : "script"} contains operations
+                that can lose data or lock the table. They run against{" "}
+                <span className="font-semibold text-ink">{connName}</span> and can&apos;t be undone.
+              </p>
+              <ul className="flex flex-col gap-1.5">
+                {guard.findings.map((f, i) => (
+                  <li key={i} className="flex items-start gap-2">
+                    <span
+                      className={`mt-1.5 h-1.5 w-1.5 flex-none rounded-full ${
+                        f.severity === "destructive" ? "bg-crit" : "bg-high"
+                      }`}
                     />
-                  ) : cell === null ? (
-                    <span className="italic text-faint">NULL</span>
-                  ) : (
-                    cell
-                  )}
-                </td>
-              ))}
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
-  );
-}
-
-function CellEditor({
-  value,
-  disabled,
-  onChange,
-}: {
-  value: string | null;
-  disabled: boolean;
-  onChange: (v: string | null) => void;
-}) {
-  if (value === null) {
-    return (
-      <div className="flex items-center gap-1.5">
-        <span className="rounded bg-panel3 px-1.5 py-0.5 text-[10px] italic text-faint">NULL</span>
-        <button
-          type="button"
-          disabled={disabled}
-          onClick={() => {
-            onChange("");
-          }}
-          className="text-[10px] text-acc2 hover:underline disabled:opacity-40"
-        >
-          set value
-        </button>
-      </div>
-    );
-  }
-  return (
-    <div className="flex items-center gap-1">
-      <input
-        value={value}
-        disabled={disabled}
-        onChange={(e) => {
-          onChange(e.target.value);
-        }}
-        className="w-full min-w-[90px] rounded border border-line bg-panel px-1.5 py-0.5 text-[12px] outline-none focus:border-acc disabled:opacity-50"
-      />
-      <button
-        type="button"
-        title="Set NULL"
-        disabled={disabled}
-        onClick={() => {
-          onChange(null);
-        }}
-        className="flex-none rounded px-1 text-[11px] text-faint hover:text-ink disabled:opacity-40"
-      >
-        ∅
-      </button>
-    </div>
-  );
-}
-
-function Field({
-  label,
-  full,
-  children,
-}: {
-  label: string;
-  full?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <label className={`flex flex-col gap-1 ${full ? "col-span-2" : ""}`}>
-      <span className="text-[11px] text-faint">{label}</span>
-      {children}
-    </label>
-  );
-}
-
-function Tab({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`rounded-md px-2.5 py-1 text-[12px] ${active ? "bg-panel3 text-ink" : "text-dim hover:text-ink"}`}
-    >
-      {label}
-    </button>
-  );
-}
-
-/** A blank-field form to INSERT a new row. Empty fields fall back to defaults. */
-function InsertRow({
-  columns,
-  onCancel,
-  onInsert,
-}: {
-  columns: string[];
-  onCancel: () => void;
-  onInsert: (draft: (string | null)[]) => Promise<boolean>;
-}) {
-  const [draft, setDraft] = useState<(string | null)[]>(() => columns.map(() => ""));
-  const [saving, setSaving] = useState(false);
-
-  const submit = () => {
-    setSaving(true);
-    void onInsert(draft).finally(() => {
-      setSaving(false);
-    });
-  };
-
-  return (
-    <div className="border-b border-line bg-acc/5 p-3">
-      <div className="mb-2 flex items-center gap-2 text-[11.5px]">
-        <Plus size={13} className="text-acc" />
-        <span className="font-semibold text-ink">New row</span>
-        <span className="text-faint">— leave a field blank to use its default</span>
-      </div>
-      <div className="flex flex-wrap gap-2">
-        {columns.map((c, j) => (
-          <label key={c} className="flex flex-col gap-0.5">
-            <span className="font-mono text-[10.5px] text-faint">{c}</span>
-            <input
-              value={draft[j] ?? ""}
-              spellCheck={false}
-              onChange={(e) => {
-                setDraft((d) => d.map((x, k) => (k === j ? e.target.value : x)));
-              }}
-              className="w-40 rounded border border-line bg-panel px-1.5 py-1 font-mono text-[12px] outline-none focus:border-acc"
-            />
-          </label>
-        ))}
-      </div>
-      <div className="mt-2.5 flex gap-2">
-        <button
-          type="button"
-          onClick={submit}
-          disabled={saving}
-          className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-semibold text-white shadow-glow disabled:opacity-40"
-          style={{ background: GRADIENT }}
-        >
-          <Check size={13} />
-          {saving ? "Inserting…" : "Insert"}
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          disabled={saving}
-          className="rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12px] hover:border-line2 disabled:opacity-40"
-        >
-          Cancel
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/** A modal showing a single cell's full value — Beekeeper's row/cell viewer. */
-function CellDetail({
-  column,
-  value,
-  onClose,
-}: {
-  column: string;
-  value: string | null;
-  onClose: () => void;
-}) {
-  const [copied, setCopied] = useState(false);
-  const pretty = value === null ? { text: "NULL", isJson: false } : prettyMaybeJson(value);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [onClose]);
-
-  return (
-    <div
-      className="fixed inset-0 z-[55] grid animate-fade place-items-center bg-black/60 p-6 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      <div
-        className="glass-strong flex max-h-[80vh] w-[640px] max-w-full animate-pop flex-col overflow-hidden rounded-xl border border-line/70 shadow-2xl"
-        onClick={(e) => {
-          e.stopPropagation();
-        }}
-      >
-        <div className="flex flex-none items-center gap-2 border-b border-line px-4 py-2.5">
-          <span className="font-mono text-[12.5px] font-semibold">{column}</span>
-          {pretty.isJson && (
-            <span className="rounded bg-panel3 px-1.5 py-0.5 text-[10px] text-faint">JSON</span>
-          )}
-          {value !== null && (
-            <span className="text-[11px] text-faint">{value.length} chars</span>
-          )}
-          <button
-            type="button"
-            onClick={() => {
-              void navigator.clipboard.writeText(value ?? "").then(() => {
-                setCopied(true);
-                setTimeout(() => {
-                  setCopied(false);
-                }, 1200);
-              });
-            }}
-            className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] hover:border-line2"
-          >
-            {copied ? <Check size={12} color="#3ecf8e" /> : <Copy size={12} />}
-            {copied ? "Copied" : "Copy"}
-          </button>
-          <button
-            type="button"
-            aria-label="Close"
-            onClick={onClose}
-            className="grid place-items-center text-faint hover:text-ink"
-          >
-            <X size={15} />
-          </button>
-        </div>
-        <div className="min-h-0 flex-1 overflow-auto p-4">
-          {value === null ? (
-            <span className="italic text-faint">NULL</span>
-          ) : value.length === 0 ? (
-            <span className="italic text-faint">(empty string)</span>
-          ) : (
-            <pre className="whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed text-ink">
-              {pretty.text}
-            </pre>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/** A compact, human-readable label for a canonical column type. */
-function typeLabel(t: CanonicalType): string {
-  switch (t.kind) {
-    case "serial":
-      return t.size === "big" ? "bigserial" : t.size === "small" ? "smallserial" : "serial";
-    case "int":
-      return t.size === "big" ? "bigint" : t.size === "small" ? "smallint" : "int";
-    case "decimal":
-      return `decimal(${String(t.precision)},${String(t.scale)})`;
-    case "string":
-      return `varchar(${String(t.length)})`;
-    default:
-      return t.kind;
-  }
-}
-
-/** phpMyAdmin-style "Structure" view: columns, keys, indexes and FKs of a table. */
-function StructureView({
-  loading,
-  error,
-  selected,
-  table,
-  onColumnMenu,
-}: {
-  loading: boolean;
-  error: string | null;
-  selected: string | null;
-  table: Table | undefined;
-  onColumnMenu: (e: React.MouseEvent, column: string) => void;
-}) {
-  if (loading) return <div className="p-4 text-[12px] text-dim">Reading the database schema…</div>;
-  if (error)
-    return (
-      <div className="m-3 rounded-lg border border-crit/40 bg-crit/10 p-3 font-mono text-[11.5px] text-crit">
-        {error}
-      </div>
-    );
-  if (!selected) return <div className="p-4 text-[12px] text-dim">Select a table on the left to view its structure.</div>;
-  if (!table)
-    return <div className="p-4 text-[12px] text-dim">No structure found for “{selected}”.</div>;
-
-  const pk = new Set(table.primaryKey ?? []);
-
-  return (
-    <div className="space-y-4 p-3">
-      <div>
-        <div className="mb-1.5 flex items-center gap-2 text-[12.5px] font-semibold">
-          <Table2 size={14} className="text-acc" />
-          {table.name}
-          <span className="text-[11px] font-normal text-faint">· {table.columns.length} columns</span>
-        </div>
-        <table className="w-full border-collapse text-[12px]">
-          <thead>
-            <tr className="text-left text-[11px] uppercase tracking-wider text-faint">
-              <th className="border-b border-line px-3 py-1.5 font-semibold">Column</th>
-              <th className="border-b border-line px-3 py-1.5 font-semibold">Type</th>
-              <th className="border-b border-line px-3 py-1.5 font-semibold">Null</th>
-              <th className="border-b border-line px-3 py-1.5 font-semibold">Key</th>
-            </tr>
-          </thead>
-          <tbody>
-            {table.columns.map((col) => (
-              <tr
-                key={col.name}
-                onContextMenu={(e) => {
-                  onColumnMenu(e, col.name);
-                }}
-                className="cursor-context-menu hover:bg-panel2/60"
-              >
-                <td className="border-b border-line/50 px-3 py-1.5 font-mono">{col.name}</td>
-                <td className="border-b border-line/50 px-3 py-1.5 font-mono text-acc2">
-                  {typeLabel(col.type)}
-                </td>
-                <td className="border-b border-line/50 px-3 py-1.5 text-dim">
-                  {col.nullable ? "YES" : "NO"}
-                </td>
-                <td className="border-b border-line/50 px-3 py-1.5">
-                  {pk.has(col.name) && (
-                    <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-high">
-                      <KeyRound size={11} /> PK
+                    <span>
+                      <span className="block text-ink">{f.reason}</span>
+                      <span className="block font-mono text-[11px] text-faint">{f.statement}</span>
                     </span>
-                  )}
-                  {col.unique && !pk.has(col.name) && (
-                    <span className="text-[11px] text-dim">unique</span>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {table.indexes.length > 0 && (
-        <div>
-          <div className="mb-1.5 flex items-center gap-2 text-[12px] font-semibold">
-            <ListTree size={13} className="text-acc" /> Indexes
-          </div>
-          <ul className="space-y-1 text-[12px]">
-            {table.indexes.map((idx, i) => (
-              <li key={i} className="font-mono text-dim">
-                {idx.unique ? "UNIQUE " : ""}({idx.columns.join(", ")})
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {table.foreignKeys.length > 0 && (
-        <div>
-          <div className="mb-1.5 flex items-center gap-2 text-[12px] font-semibold">
-            <GitBranch size={13} className="text-acc" /> Foreign keys
-          </div>
-          <ul className="space-y-1 text-[12px]">
-            {table.foreignKeys.map((fk, i) => (
-              <li key={i} className="font-mono text-dim">
-                ({fk.columns.join(", ")}) → {fk.refTable} ({fk.refColumns.join(", ")})
-                {fk.onDelete ? ` ON DELETE ${fk.onDelete.toUpperCase()}` : ""}
-              </li>
-            ))}
-          </ul>
-        </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          }
+          onConfirm={() => {
+            const sql = guard.sql;
+            setGuard(null);
+            runQuery(sql);
+          }}
+          onCancel={() => {
+            setGuard(null);
+          }}
+        />
       )}
     </div>
   );

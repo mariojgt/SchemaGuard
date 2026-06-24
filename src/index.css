@@ -120,6 +120,13 @@ body {
     box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.06);
   }
 
+  /* Tactile press: a subtle scale-down on click. Rides the base-layer
+     `transform` transition so it's smooth and interruptible, and skips
+     disabled controls so they don't appear to respond. */
+  .press:active:not(:disabled) {
+    transform: scale(0.96);
+  }
+
   /* The brand gradient as text — for the wordmark and accent headings. */
   .text-gradient {
     background: linear-gradient(120deg, rgb(var(--c-acc)), rgb(var(--c-acc2)));
