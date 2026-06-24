@@ -51,7 +51,7 @@ export function CreateDatabaseDialog({
             type="button"
             onClick={onCancel}
             disabled={creating}
-            className="ml-auto grid place-items-center text-faint hover:text-ink disabled:opacity-40"
+            className="relative ml-auto grid place-items-center text-faint after:absolute after:inset-[-10px] hover:text-ink disabled:opacity-40"
           >
             <X size={15} />
           </button>
@@ -79,7 +79,7 @@ export function CreateDatabaseDialog({
               A database named “{trimmed}” already exists.
             </p>
           ) : (
-            <p className="mt-2 text-[11px] text-faint">
+            <p className="mt-2 text-pretty text-[11px] text-faint">
               Creates an empty database on this {dialect === "mysql" ? "MySQL" : "PostgreSQL"}{" "}
               server and switches to it.
             </p>
@@ -91,7 +91,7 @@ export function CreateDatabaseDialog({
             type="button"
             onClick={onCancel}
             disabled={creating}
-            className="rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12.5px] disabled:opacity-40"
+            className="press rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12.5px] disabled:opacity-40"
           >
             Cancel
           </button>
@@ -99,7 +99,7 @@ export function CreateDatabaseDialog({
             type="button"
             onClick={submit}
             disabled={!canCreate}
-            className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12.5px] font-semibold text-white shadow-glow disabled:opacity-40"
+            className="press inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12.5px] font-semibold text-white shadow-glow disabled:opacity-40"
             style={{ background: GRADIENT }}
           >
             <Plus size={13} />

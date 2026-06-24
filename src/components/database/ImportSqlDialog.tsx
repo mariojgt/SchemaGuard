@@ -156,7 +156,7 @@ export function ImportSqlDialog({
             type="button"
             onClick={onClose}
             disabled={running}
-            className="ml-auto grid place-items-center text-faint hover:text-ink disabled:opacity-40"
+            className="relative ml-auto grid place-items-center text-faint after:absolute after:inset-[-10px] hover:text-ink disabled:opacity-40"
           >
             <X size={15} />
           </button>
@@ -194,7 +194,7 @@ export function ImportSqlDialog({
 
           <div className="mt-3 flex items-start gap-2 rounded-lg border border-med/30 bg-med/10 px-3 py-2 text-[11.5px] text-med">
             <AlertTriangle size={14} className="mt-0.5 flex-none" />
-            <span>
+            <span className="text-pretty">
               Statements run directly against <span className="font-semibold">{database}</span>. This
               can create, modify, or overwrite data and isn&apos;t undoable.
             </span>
@@ -215,7 +215,7 @@ export function ImportSqlDialog({
                 <ShieldOff size={12} className="text-high" />
                 Drop existing tables first
               </span>
-              <span className="mt-0.5 block text-[11px] text-faint">
+              <span className="mt-0.5 block text-pretty text-[11px] text-faint">
                 {tableCount > 0
                   ? `Permanently deletes all ${String(tableCount)} table${tableCount === 1 ? "" : "s"} in ${database} before importing, so a full dump restores without "already exists" errors.`
                   : `${database} is already empty — the dump will import as-is.`}
@@ -238,7 +238,7 @@ export function ImportSqlDialog({
                 <ShieldOff size={12} className="text-med" />
                 Disable foreign-key checks during import
               </span>
-              <span className="mt-0.5 block text-[11px] text-faint">
+              <span className="mt-0.5 block text-pretty text-[11px] text-faint">
                 Recommended for full dumps — lets tables and rows load in any order without
                 constraint errors (1452). Re-enabled automatically when the import finishes.
               </span>
@@ -266,7 +266,7 @@ export function ImportSqlDialog({
             type="button"
             onClick={onClose}
             disabled={running}
-            className="rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12.5px] disabled:opacity-40"
+            className="press rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12.5px] disabled:opacity-40"
           >
             Cancel
           </button>
@@ -276,7 +276,7 @@ export function ImportSqlDialog({
               void run();
             }}
             disabled={!file || running}
-            className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12.5px] font-semibold text-white shadow-glow disabled:opacity-40 disabled:shadow-none"
+            className="press inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12.5px] font-semibold text-white shadow-glow disabled:opacity-40 disabled:shadow-none"
             style={{ background: GRADIENT }}
           >
             {running ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}

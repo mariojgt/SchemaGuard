@@ -62,7 +62,7 @@ export function DropTablesDialog({
           <button
             type="button"
             onClick={onCancel}
-            className="ml-auto grid place-items-center text-faint hover:text-ink"
+            className="relative ml-auto grid place-items-center text-faint after:absolute after:inset-[-10px] hover:text-ink"
           >
             <X size={15} />
           </button>
@@ -77,7 +77,7 @@ export function DropTablesDialog({
           {guarded && (
             <div className="mt-3 flex items-start gap-2 rounded-lg border border-acc/40 bg-acc/10 px-3 py-2 text-[11.5px] text-acc">
               <GitCompare size={14} className="mt-0.5 flex-none" />
-              <span>
+              <span className="text-pretty">
                 <span className="font-semibold">
                   {inDesign.size} of these {inDesign.size === 1 ? "is" : "are"} in your design.
                 </span>{" "}
@@ -116,7 +116,7 @@ export function DropTablesDialog({
                 <ShieldOff size={12} className="text-med" />
                 Drop without foreign-key checks
               </span>
-              <span className="mt-0.5 block text-[11px] text-faint">{fkHint}</span>
+              <span className="mt-0.5 block text-pretty text-[11px] text-faint">{fkHint}</span>
             </span>
           </label>
 
@@ -131,7 +131,7 @@ export function DropTablesDialog({
                 }}
                 className="mt-0.5 h-3.5 w-3.5 accent-[#a64bff]"
               />
-              <span className="font-medium text-ink">
+              <span className="text-pretty font-medium text-ink">
                 I understand {inDesign.size === 1 ? "this table is" : "these tables are"} part of my
                 design and still want to drop {inDesign.size === 1 ? "it" : "them"}.
               </span>
@@ -144,7 +144,7 @@ export function DropTablesDialog({
             type="button"
             onClick={onCancel}
             disabled={dropping}
-            className="rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12.5px] disabled:opacity-40"
+            className="press rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12.5px] disabled:opacity-40"
           >
             Cancel
           </button>
@@ -154,7 +154,7 @@ export function DropTablesDialog({
               onDrop(disableFk);
             }}
             disabled={!canDrop}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-crit/50 bg-crit/15 px-3 py-1.5 text-[12.5px] font-semibold text-crit hover:bg-crit/25 disabled:opacity-40"
+            className="press inline-flex items-center gap-1.5 rounded-lg border border-crit/50 bg-crit/15 px-3 py-1.5 text-[12.5px] font-semibold text-crit hover:bg-crit/25 disabled:opacity-40"
           >
             <Trash2 size={13} />
             {dropping ? "Dropping…" : `Drop ${String(tables.length)}`}
