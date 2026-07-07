@@ -41,7 +41,7 @@ The analysis engine is a pure-TS workspace package, `packages/core` (no DOM/Taur
 ```bash
 pnpm install
 
-pnpm dev            # browser (fastest loop) → http://localhost:1420
+pnpm dev            # browser (fastest loop) → http://localhost:1425
 pnpm tauri:dev      # full desktop app
 
 pnpm test           # engine tests (vitest)
