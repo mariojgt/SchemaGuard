@@ -1,4 +1,4 @@
-import { Check, Pencil, Trash2, X } from "lucide-react";
+import { Check, EyeOff, Pencil, Trash2, X } from "lucide-react";
 import { useState } from "react";
 
 import type { QueryResult } from "../../lib/db";
@@ -8,8 +8,10 @@ export function ResultGrid({
   sort,
   onSort,
   pkColumns,
+  hiddenRows,
   onSaveRow,
   onDeleteRow,
+  onHideRow,
   onCellMenu,
   onCellClick,
 }: {
@@ -17,8 +19,10 @@ export function ResultGrid({
   sort?: { col: string; dir: "asc" | "desc" } | null;
   onSort?: (col: string) => void;
   pkColumns?: string[];
+  hiddenRows?: Set<number>;
   onSaveRow?: (original: (string | null)[], next: (string | null)[]) => Promise<boolean>;
   onDeleteRow?: (row: (string | null)[]) => Promise<boolean>;
+  onHideRow?: (index: number) => void;
   onCellMenu?: (
     e: React.MouseEvent,
     column: string,
@@ -32,6 +36,10 @@ export function ResultGrid({
   const [confirmDelete, setConfirmDelete] = useState<number | null>(null);
   const [draft, setDraft] = useState<(string | null)[]>([]);
   const [saving, setSaving] = useState(false);
+  const visibleRowIndexes = result.rows
+    .map((_, i) => i)
+    .filter((i) => !(hiddenRows?.has(i) ?? false));
+  const actionColumns = (onHideRow ? 1 : 0) + (editable ? 1 : 0);
 
   if (result.columns.length === 0) {
     return (
@@ -55,14 +63,15 @@ export function ResultGrid({
   };
 
   return (
-    <table className="w-full border-collapse text-[12px]">
-      <thead className="sticky top-0">
+    <table className="w-max min-w-full border-collapse text-[12px]">
+      <thead className="sticky top-0 z-10">
         <tr>
+          {onHideRow && <th className="w-px border-b border-line bg-panel2" />}
           {editable && <th className="w-px border-b border-line bg-panel2" />}
           {result.columns.map((c) => (
             <th
               key={c}
-              className="border-b border-line bg-panel2 px-3 py-1.5 text-left font-semibold text-dim"
+              className="min-w-[140px] max-w-[280px] border-b border-line bg-panel2 px-3 py-1.5 text-left font-semibold text-dim"
             >
               {onSort ? (
                 <button
@@ -70,26 +79,53 @@ export function ResultGrid({
                   onClick={() => {
                     onSort(c);
                   }}
-                  className="inline-flex items-center gap-1 hover:text-ink"
+                  className="inline-flex max-w-full items-center gap-1 hover:text-ink"
                   title="Sort by this column"
                 >
-                  {c}
+                  <span className="truncate">{c}</span>
                   <span className="text-acc">
                     {sort?.col === c ? (sort.dir === "asc" ? "↑" : "↓") : ""}
                   </span>
                 </button>
               ) : (
-                c
+                <span className="block truncate">{c}</span>
               )}
             </th>
           ))}
         </tr>
       </thead>
       <tbody>
-        {result.rows.map((row, i) => {
+        {visibleRowIndexes.length === 0 && (
+          <tr>
+            <td
+              colSpan={result.columns.length + actionColumns}
+              className="border-b border-line/50 px-3 py-6 text-center text-[12px] text-dim"
+            >
+              {result.rows.length === 0 ? "No rows returned." : "All rows on this page are hidden."}
+            </td>
+          </tr>
+        )}
+        {visibleRowIndexes.map((i) => {
+          const row = result.rows[i];
+          if (!row) return null;
           const isEdit = editing === i;
           return (
             <tr key={i} className={isEdit ? "bg-acc/5" : "hover:bg-panel2/60"}>
+              {onHideRow && (
+                <td className="border-b border-line/50 px-2 py-1 align-top">
+                  <button
+                    type="button"
+                    title="Hide row"
+                    disabled={isEdit || saving}
+                    onClick={() => {
+                      onHideRow(i);
+                    }}
+                    className="grid h-6 w-6 place-items-center rounded text-faint hover:bg-panel2 hover:text-ink disabled:opacity-30"
+                  >
+                    <EyeOff size={12} />
+                  </button>
+                </td>
+              )}
               {editable && (
                 <td className="border-b border-line/50 px-2 py-1 align-top">
                   {isEdit ? (
@@ -193,7 +229,7 @@ export function ResultGrid({
                       : undefined
                   }
                   title={onCellClick && !isEdit ? "Click to view full value" : undefined}
-                  className={`max-w-[360px] border-b border-line/50 px-3 py-1.5 font-mono ${isEdit ? "" : "cursor-pointer truncate"}`}
+                  className={`min-w-[140px] max-w-[360px] border-b border-line/50 px-3 py-1.5 font-mono ${isEdit ? "" : "cursor-pointer truncate whitespace-nowrap"}`}
                 >
                   {isEdit ? (
                     <CellEditor

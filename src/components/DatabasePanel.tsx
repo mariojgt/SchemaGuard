@@ -6,6 +6,8 @@ import {
   Database,
   Download,
   Equal,
+  Eye,
+  EyeOff,
   Filter,
   GitBranch,
   GitCompare,
@@ -137,6 +139,8 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
   // Recent successfully-run queries from the Query tab (newest first).
   const [history, setHistory] = useState<string[]>([]);
   const [exportOpen, setExportOpen] = useState(false);
+  const [rowMenuOpen, setRowMenuOpen] = useState(false);
+  const [hiddenRows, setHiddenRows] = useState<Set<number>>(new Set());
   // The cell whose full value is shown in the detail viewer (Beekeeper-style).
   const [detail, setDetail] = useState<{ column: string; value: string | null } | null>(null);
   const queryRef = useRef<HTMLTextAreaElement>(null);
@@ -306,9 +310,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
         switchDatabase(trimmed);
       })
       .catch((e: unknown) => {
-        toast.error(
-          `Couldn't create “${trimmed}”: ${e instanceof Error ? e.message : String(e)}`,
-        );
+        toast.error(`Couldn't create “${trimmed}”: ${e instanceof Error ? e.message : String(e)}`);
       })
       .finally(() => {
         setCreatingDb(false);
@@ -534,23 +536,47 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
   // Export the current result grid to a downloaded CSV, JSON or SQL file.
   const exportResult = (format: "csv" | "json" | "sql") => {
     setExportOpen(false);
+    setRowMenuOpen(false);
     if (!result || result.columns.length === 0) {
       toast.error("Nothing to export.");
       return;
     }
+    const rows = result.rows.filter((_, i) => !hiddenRows.has(i));
+    if (rows.length === 0) {
+      toast.error("No visible rows to export.");
+      return;
+    }
     const base = selected ?? "query";
     if (format === "csv") {
-      downloadText(`${base}.csv`, toCsv(result.columns, result.rows), "text/csv");
+      downloadText(`${base}.csv`, toCsv(result.columns, rows), "text/csv");
     } else if (format === "json") {
-      downloadText(`${base}.json`, toJson(result.columns, result.rows), "application/json");
+      downloadText(`${base}.json`, toJson(result.columns, rows), "application/json");
     } else {
       downloadText(
         `${base}.sql`,
-        toSqlInserts(connDialect, base, result.columns, result.rows),
+        toSqlInserts(connDialect, base, result.columns, rows),
         "text/plain",
       );
     }
-    toast.success(`Exported ${String(result.rows.length)} row(s) as ${format.toUpperCase()}.`);
+    toast.success(`Exported ${String(rows.length)} row(s) as ${format.toUpperCase()}.`);
+  };
+
+  const toggleHiddenRow = (index: number) => {
+    setHiddenRows((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  };
+
+  const showAllRows = () => {
+    setHiddenRows(new Set());
+  };
+
+  const hideAllRows = () => {
+    if (!result) return;
+    setHiddenRows(new Set(result.rows.map((_, i) => i)));
   };
 
   const page = (delta: number) => {
@@ -767,6 +793,11 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
     consumeDbQuery();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingDbQuery, connId]);
+
+  useEffect(() => {
+    setHiddenRows(new Set());
+    setRowMenuOpen(false);
+  }, [result]);
 
   const copy = (text: string, label: string) => {
     void navigator.clipboard.writeText(text).then(() => {
@@ -1068,11 +1099,14 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
   }
 
   // ---- connected: client workspace ----
-  const visibleTables = tables.filter((t) =>
-    t.toLowerCase().includes(tableFilter.toLowerCase()),
-  );
+  const visibleTables = tables.filter((t) => t.toLowerCase().includes(tableFilter.toLowerCase()));
   const allVisibleSelected =
     visibleTables.length > 0 && visibleTables.every((t) => selectedTables.has(t));
+  const resultRowCount = result?.rows.length ?? 0;
+  const hiddenRowCount = result?.rows.reduce((n, _, i) => n + (hiddenRows.has(i) ? 1 : 0), 0) ?? 0;
+  const visibleRowCount = resultRowCount - hiddenRowCount;
+  const pageStart = resultRowCount === 0 ? 0 : offset + 1;
+  const pageEnd = offset + resultRowCount;
   const toggleSelectAllVisible = () => {
     setSelectedTables((prev) => {
       const next = new Set(prev);
@@ -1084,7 +1118,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex h-10 flex-none items-center gap-2 border-b border-line bg-panel px-3">
+      <div className="flex min-h-10 flex-none flex-wrap items-center gap-x-2 gap-y-1 border-b border-line bg-panel px-3 py-1.5">
         <PlugZap size={15} className="text-acc" />
         <span className="text-[12.5px] font-semibold">{connName}</span>
         {activeInfo && (
@@ -1194,7 +1228,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
             )}
         </div>
       ) : (
-        <div className="grid min-h-0 flex-1 grid-cols-[220px_1fr]">
+        <div className="grid min-h-0 flex-1 grid-cols-[minmax(180px,220px)_minmax(0,1fr)] overflow-hidden">
           <aside className="min-h-0 overflow-auto border-r border-line bg-panel p-2">
             <div className="flex items-center px-2 py-1">
               <span className="text-[11px] font-bold uppercase tracking-wider text-faint">
@@ -1234,7 +1268,9 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                     onChange={toggleSelectAllVisible}
                     className="h-3.5 w-3.5 accent-[#a64bff]"
                   />
-                  {selectedTables.size > 0 ? `${String(selectedTables.size)} selected` : "Select all"}
+                  {selectedTables.size > 0
+                    ? `${String(selectedTables.size)} selected`
+                    : "Select all"}
                 </label>
                 {selectedTables.size > 0 && (
                   <button
@@ -1302,10 +1338,10 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
             )}
           </aside>
 
-          <section className="flex min-h-0 flex-col">
+          <section className="flex min-h-0 min-w-0 flex-col overflow-hidden">
             {view === "query" && (
               <div className="flex flex-none flex-col gap-2 border-b border-line p-2">
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   <select
                     value=""
                     disabled={history.length === 0}
@@ -1315,27 +1351,44 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                     title="Recent queries"
                     className="max-w-[260px] rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] outline-none disabled:opacity-40"
                   >
-                    <option value="">{history.length > 0 ? "Recent queries…" : "No history yet"}</option>
+                    <option value="">
+                      {history.length > 0 ? "Recent queries…" : "No history yet"}
+                    </option>
                     {history.map((h, i) => (
                       <option key={i} value={h}>
                         {h.replace(/\s+/g, " ").slice(0, 70)}
                       </option>
                     ))}
                   </select>
-                  <span className="ml-auto text-[11px] text-faint">Export result:</span>
-                  {(["csv", "json", "sql"] as const).map((fmt) => (
-                    <button
-                      key={fmt}
-                      type="button"
-                      onClick={() => {
-                        exportResult(fmt);
+                  <div className="ml-auto flex flex-wrap items-center gap-2">
+                    <RowVisibilityMenu
+                      result={result}
+                      rowOffset={0}
+                      open={rowMenuOpen}
+                      hiddenRows={hiddenRows}
+                      onOpenChange={(open) => {
+                        setRowMenuOpen(open);
+                        if (open) setExportOpen(false);
                       }}
-                      disabled={!result || result.rows.length === 0}
-                      className="press rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] uppercase hover:border-line2 disabled:opacity-40"
-                    >
-                      {fmt}
-                    </button>
-                  ))}
+                      onToggleRow={toggleHiddenRow}
+                      onShowAll={showAllRows}
+                      onHideAll={hideAllRows}
+                    />
+                    <span className="text-[11px] text-faint">Export result:</span>
+                    {(["csv", "json", "sql"] as const).map((fmt) => (
+                      <button
+                        key={fmt}
+                        type="button"
+                        onClick={() => {
+                          exportResult(fmt);
+                        }}
+                        disabled={!result || visibleRowCount === 0}
+                        className="press rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] uppercase hover:border-line2 disabled:opacity-40"
+                      >
+                        {fmt}
+                      </button>
+                    ))}
+                  </div>
                 </div>
                 <div className="flex items-end gap-2">
                   <textarea
@@ -1368,9 +1421,9 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
             )}
 
             {view === "data" && selected && (
-              <div className="flex h-10 flex-none items-center gap-2 border-b border-line px-3 text-[11.5px] text-dim">
-                <span className="font-semibold text-ink">{selected}</span>
-                <div className="relative ml-2 max-w-[280px] flex-1">
+              <div className="flex min-h-10 flex-none flex-wrap items-center gap-x-2 gap-y-1 border-b border-line px-3 py-1.5 text-[11.5px] text-dim">
+                <span className="max-w-[220px] truncate font-semibold text-ink">{selected}</span>
+                <div className="relative min-w-[180px] max-w-[320px] flex-1">
                   <Search
                     size={12}
                     className="absolute left-2 top-1/2 -translate-y-1/2 text-faint"
@@ -1414,13 +1467,27 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                   <Plus size={13} />
                   Insert row
                 </button>
+                <RowVisibilityMenu
+                  result={result}
+                  rowOffset={offset}
+                  open={rowMenuOpen}
+                  hiddenRows={hiddenRows}
+                  onOpenChange={(open) => {
+                    setRowMenuOpen(open);
+                    if (open) setExportOpen(false);
+                  }}
+                  onToggleRow={toggleHiddenRow}
+                  onShowAll={showAllRows}
+                  onHideAll={hideAllRows}
+                />
                 <div className="relative">
                   <button
                     type="button"
                     onClick={() => {
+                      setRowMenuOpen(false);
                       setExportOpen((v) => !v);
                     }}
-                    disabled={!result || result.rows.length === 0}
+                    disabled={!result || visibleRowCount === 0}
                     className="press inline-flex items-center gap-1 rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] hover:border-line2 disabled:opacity-40"
                   >
                     <Download size={13} />
@@ -1459,8 +1526,11 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                   )}
                 </div>
                 <span className="tabular-nums">
-                  rows {offset + 1}–{offset + (result?.rows.length ?? 0)}
+                  rows {pageStart}–{pageEnd}
                   {rowCount !== null && <span className="text-faint"> of {rowCount}</span>}
+                  {hiddenRowCount > 0 && (
+                    <span className="text-faint"> · {String(visibleRowCount)} visible</span>
+                  )}
                 </span>
                 <button
                   type="button"
@@ -1485,7 +1555,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
               </div>
             )}
 
-            <div className="min-h-0 flex-1 overflow-auto">
+            <div className="min-h-0 flex-1 overflow-auto overscroll-contain">
               {view === "structure" ? (
                 <StructureView
                   loading={diagramLoading}
@@ -1507,15 +1577,20 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                       {resultError}
                     </div>
                   )}
-                  {!loading && !resultError && view === "data" && inserting && selected && result && (
-                    <InsertRow
-                      columns={result.columns}
-                      onCancel={() => {
-                        setInserting(false);
-                      }}
-                      onInsert={insertRow}
-                    />
-                  )}
+                  {!loading &&
+                    !resultError &&
+                    view === "data" &&
+                    inserting &&
+                    selected &&
+                    result && (
+                      <InsertRow
+                        columns={result.columns}
+                        onCancel={() => {
+                          setInserting(false);
+                        }}
+                        onInsert={insertRow}
+                      />
+                    )}
                   {!loading &&
                     !resultError &&
                     result &&
@@ -1525,8 +1600,10 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                         sort={sort}
                         onSort={toggleSort}
                         pkColumns={pkColumns}
+                        hiddenRows={hiddenRows}
                         onSaveRow={saveRow}
                         onDeleteRow={deleteRow}
+                        onHideRow={toggleHiddenRow}
                         onCellMenu={(e, column, value, row) => {
                           e.preventDefault();
                           setMenu({
@@ -1540,7 +1617,11 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                         }}
                       />
                     ) : (
-                      <ResultGrid result={result} />
+                      <ResultGrid
+                        result={result}
+                        hiddenRows={hiddenRows}
+                        onHideRow={toggleHiddenRow}
+                      />
                     ))}
                 </>
               )}
@@ -1630,8 +1711,8 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
           message={
             <div className="flex flex-col gap-2">
               <p className="text-pretty">
-                This {guard.findings.length === 1 ? "statement" : "script"} contains operations
-                that can lose data or lock the table. They run against{" "}
+                This {guard.findings.length === 1 ? "statement" : "script"} contains operations that
+                can lose data or lock the table. They run against{" "}
                 <span className="font-semibold text-ink">{connName}</span> and can&apos;t be undone.
               </p>
               <ul className="flex flex-col gap-1.5">
@@ -1663,4 +1744,126 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
       )}
     </div>
   );
+}
+
+function RowVisibilityMenu({
+  result,
+  rowOffset,
+  open,
+  hiddenRows,
+  onOpenChange,
+  onToggleRow,
+  onShowAll,
+  onHideAll,
+}: {
+  result: QueryResult | null;
+  rowOffset: number;
+  open: boolean;
+  hiddenRows: Set<number>;
+  onOpenChange: (open: boolean) => void;
+  onToggleRow: (index: number) => void;
+  onShowAll: () => void;
+  onHideAll: () => void;
+}) {
+  if (!result || result.rows.length === 0) return null;
+
+  const hiddenCount = result.rows.reduce((n, _, i) => n + (hiddenRows.has(i) ? 1 : 0), 0);
+  const visibleCount = result.rows.length - hiddenCount;
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => {
+          onOpenChange(!open);
+        }}
+        title="Show or hide rows in the current result"
+        className={`press inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11.5px] ${
+          hiddenCount > 0
+            ? "border-acc/40 bg-acc/15 text-acc"
+            : "border-line bg-panel2 hover:border-line2"
+        }`}
+      >
+        <Eye size={13} />
+        Rows
+        <span className="tabular-nums text-faint">
+          {visibleCount}/{result.rows.length}
+        </span>
+      </button>
+      {open && (
+        <div className="absolute right-0 top-8 z-30 w-80 max-w-[calc(100vw-2rem)] overflow-hidden rounded-lg border border-line bg-panel2 shadow-xl">
+          <div className="flex items-center gap-2 border-b border-line px-3 py-2">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-faint">
+              Visible rows
+            </span>
+            <span className="ml-auto text-[11px] tabular-nums text-dim">
+              {visibleCount}/{result.rows.length}
+            </span>
+          </div>
+          <div className="flex items-center gap-1 border-b border-line p-2">
+            <button
+              type="button"
+              disabled={hiddenCount === 0}
+              onClick={onShowAll}
+              className="press inline-flex items-center gap-1 rounded-md border border-line bg-panel px-2 py-1 text-[11.5px] hover:border-line2 disabled:opacity-40"
+            >
+              <Eye size={12} />
+              Show all
+            </button>
+            <button
+              type="button"
+              disabled={hiddenCount === result.rows.length}
+              onClick={onHideAll}
+              className="press inline-flex items-center gap-1 rounded-md border border-line bg-panel px-2 py-1 text-[11.5px] hover:border-line2 disabled:opacity-40"
+            >
+              <EyeOff size={12} />
+              Hide all
+            </button>
+          </div>
+          <div className="max-h-72 overflow-auto py-1">
+            {result.rows.map((row, i) => {
+              const visible = !hiddenRows.has(i);
+              return (
+                <label
+                  key={i}
+                  className={`flex min-w-0 cursor-pointer items-center gap-2 px-3 py-1.5 text-[12px] hover:bg-panel3 ${
+                    visible ? "text-ink" : "text-faint"
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={visible}
+                    onChange={() => {
+                      onToggleRow(i);
+                    }}
+                    className="h-3.5 w-3.5 flex-none accent-[#a64bff]"
+                  />
+                  <span className="w-9 flex-none text-right font-mono text-[11px] tabular-nums text-faint">
+                    #{rowOffset + i + 1}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate font-mono text-[11px]">
+                    {rowPreview(result.columns, row)}
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function rowPreview(columns: string[], row: (string | null)[]): string {
+  const cells = row.slice(0, 3).map((value, i) => {
+    const column = columns[i] ?? `col ${String(i + 1)}`;
+    return `${column}: ${formatCellPreview(value)}`;
+  });
+  return cells.length > 0 ? cells.join(" · ") : "empty row";
+}
+
+function formatCellPreview(value: string | null): string {
+  if (value === null) return "NULL";
+  if (value.length === 0) return "''";
+  return value.length > 24 ? `${value.slice(0, 24)}…` : value;
 }
