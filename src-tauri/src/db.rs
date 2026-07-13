@@ -58,6 +58,7 @@ impl ConnInfo {
 #[serde(rename_all = "camelCase")]
 pub struct QueryResult {
     columns: Vec<String>,
+    column_types: Vec<String>,
     rows: Vec<Vec<Option<String>>>,
     rows_affected: u64,
 }
@@ -86,8 +87,24 @@ fn get(state: &DbState, id: &str) -> Result<Db, String> {
 pub async fn db_connect(state: tauri::State<'_, DbState>, info: ConnInfo) -> Result<String, String> {
     let url = info.url();
     let db = match info.dialect.as_str() {
-        "mysql" => Db::My(sqlx::MySqlPool::connect(&url).await.map_err(err)?),
-        _ => Db::Pg(sqlx::PgPool::connect(&url).await.map_err(err)?),
+        // The database workspace represents one deliberate live session. Keep
+        // the pool at one physical connection so opening the table list, row
+        // count and data grid together does not fan out into several server
+        // sessions behind the user's back.
+        "mysql" => Db::My(
+            sqlx::mysql::MySqlPoolOptions::new()
+                .max_connections(1)
+                .connect(&url)
+                .await
+                .map_err(err)?,
+        ),
+        _ => Db::Pg(
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect(&url)
+                .await
+                .map_err(err)?,
+        ),
     };
     let id = next_id();
     state
@@ -99,12 +116,21 @@ pub async fn db_connect(state: tauri::State<'_, DbState>, info: ConnInfo) -> Res
 }
 
 #[tauri::command]
-pub fn db_disconnect(state: tauri::State<'_, DbState>, id: String) -> Result<(), String> {
-    state
+pub async fn db_disconnect(state: tauri::State<'_, DbState>, id: String) -> Result<(), String> {
+    let db = state
         .0
         .lock()
         .map_err(|_| "lock poisoned".to_string())?
         .remove(&id);
+    // `Pool::close` waits for the server session to be released. Dropping the
+    // map entry alone leaves shutdown to the pool's background cleanup and can
+    // make a disconnected workspace briefly look connected on the DB server.
+    if let Some(db) = db {
+        match db {
+            Db::Pg(pool) => pool.close().await,
+            Db::My(pool) => pool.close().await,
+        }
+    }
     Ok(())
 }
 
@@ -628,12 +654,26 @@ async fn run_pg(pool: &sqlx::PgPool, sql: &str) -> Result<QueryResult, String> {
         .first()
         .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
         .unwrap_or_default();
+    let column_types: Vec<String> = rows
+        .first()
+        .map(|r| {
+            r.columns()
+                .iter()
+                .map(|c| c.type_info().name().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
     let out = rows
         .iter()
         .map(|row| (0..columns.len()).map(|i| pg_cell(row, i)).collect())
         .collect::<Vec<Vec<Option<String>>>>();
     let n = out.len() as u64;
-    Ok(QueryResult { columns, rows: out, rows_affected: n })
+    Ok(QueryResult {
+        columns,
+        column_types,
+        rows: out,
+        rows_affected: n,
+    })
 }
 
 async fn run_my(pool: &sqlx::MySqlPool, sql: &str) -> Result<QueryResult, String> {
@@ -642,12 +682,26 @@ async fn run_my(pool: &sqlx::MySqlPool, sql: &str) -> Result<QueryResult, String
         .first()
         .map(|r| r.columns().iter().map(|c| c.name().to_string()).collect())
         .unwrap_or_default();
+    let column_types: Vec<String> = rows
+        .first()
+        .map(|r| {
+            r.columns()
+                .iter()
+                .map(|c| c.type_info().name().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
     let out = rows
         .iter()
         .map(|row| (0..columns.len()).map(|i| my_cell(row, i)).collect())
         .collect::<Vec<Vec<Option<String>>>>();
     let n = out.len() as u64;
-    Ok(QueryResult { columns, rows: out, rows_affected: n })
+    Ok(QueryResult {
+        columns,
+        column_types,
+        rows: out,
+        rows_affected: n,
+    })
 }
 
 fn pg_cell(row: &sqlx::postgres::PgRow, i: usize) -> Option<String> {

@@ -95,6 +95,31 @@ body {
   }
 }
 
+@layer components {
+  /* Database connection form fields share a calmer, roomier treatment than
+     the dense data-grid controls. */
+  .inp {
+    width: 100%;
+    border: 1px solid rgb(var(--c-line));
+    border-radius: 8px;
+    background: rgb(var(--c-panel2));
+    padding: 8px 10px;
+    color: rgb(var(--c-ink));
+    font-size: 12.5px;
+    outline: none;
+    box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.025);
+  }
+
+  .inp:hover {
+    border-color: rgb(var(--c-line2));
+  }
+
+  .inp:focus {
+    border-color: rgb(var(--c-acc) / 0.7);
+    box-shadow: 0 0 0 3px rgb(var(--c-acc) / 0.09);
+  }
+}
+
 /* Never animate node transform — it must track the cursor 1:1 while dragging. */
 .react-flow__node {
   transition:

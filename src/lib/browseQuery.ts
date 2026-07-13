@@ -73,7 +73,7 @@ export function buildUpdateQuery(opts: UpdateOptions): string {
   const mysql = opts.dialect === "mysql";
   const qid = (id: string) =>
     mysql ? `\`${id.replace(/`/g, "``")}\`` : `"${id.replace(/"/g, '""')}"`;
-  const lit = (v: string | null) => (v === null ? "NULL" : `'${v.replace(/'/g, "''")}'`);
+  const lit = (v: string | null) => sqlLiteral(v, opts.dialect);
 
   const setClause = opts.set.map((s) => `${qid(s.column)} = ${lit(s.value)}`).join(", ");
   const whereClause = opts.where
@@ -92,8 +92,14 @@ export function quoteIdent(dialect: DbDialect, id: string): string {
 
 /** A quoted string literal, or NULL. Values from the grid arrive as strings and
  *  the database coerces them to each column's type (works in Postgres & MySQL). */
-export function sqlLiteral(value: string | null): string {
-  return value === null ? "NULL" : `'${value.replace(/'/g, "''")}'`;
+export function sqlLiteral(value: string | null, dialect: DbDialect = "postgres"): string {
+  if (value === null) return "NULL";
+  // MySQL treats backslashes as escapes in string literals by default. JSON
+  // commonly contains escaped quotes, slashes and control characters, so a
+  // value that is valid in the editor can become invalid unless backslashes
+  // survive the SQL literal intact.
+  const escaped = (dialect === "mysql" ? value.replace(/\\/g, "\\\\") : value).replace(/'/g, "''");
+  return `'${escaped}'`;
 }
 
 /** `column = 'value'` / `column <> 'value'` (or `IS [NOT] NULL`) for a WHERE clause. */
@@ -105,7 +111,7 @@ export function whereSnippet(
 ): string {
   const id = quoteIdent(dialect, column);
   if (value === null) return `${id} IS ${op === "=" ? "" : "NOT "}NULL`;
-  return `${id} ${op} ${sqlLiteral(value)}`;
+  return `${id} ${op} ${sqlLiteral(value, dialect)}`;
 }
 
 /**
@@ -122,7 +128,7 @@ export function buildInsertQuery(opts: {
 }): string {
   if (opts.values.length === 0) throw new Error("No values to insert.");
   const cols = opts.values.map((v) => quoteIdent(opts.dialect, v.column)).join(", ");
-  const lits = opts.values.map((v) => sqlLiteral(v.value)).join(", ");
+  const lits = opts.values.map((v) => sqlLiteral(v.value, opts.dialect)).join(", ");
   return `INSERT INTO ${quoteIdent(opts.dialect, opts.table)} (${cols}) VALUES (${lits})`;
 }
 

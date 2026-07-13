@@ -2,21 +2,31 @@ import { Check, Plus } from "lucide-react";
 import { useState } from "react";
 
 import { GRADIENT } from "./constants";
+import { isJsonColumnType, jsonValueError } from "./valueEditing";
+import { ValueEditor } from "./ValueEditor";
 
 /** A blank-field form to INSERT a new row. Empty fields fall back to defaults. */
 export function InsertRow({
   columns,
+  columnTypes,
   onCancel,
   onInsert,
 }: {
   columns: string[];
+  columnTypes?: string[] | undefined;
   onCancel: () => void;
   onInsert: (draft: (string | null)[]) => Promise<boolean>;
 }) {
   const [draft, setDraft] = useState<(string | null)[]>(() => columns.map(() => ""));
   const [saving, setSaving] = useState(false);
+  const invalidJson = draft.some(
+    (value, index) =>
+      isJsonColumnType(columnTypes?.[index]) &&
+      jsonValueError(value, { allowEmpty: true }) !== null,
+  );
 
   const submit = () => {
+    if (invalidJson) return;
     setSaving(true);
     void onInsert(draft).finally(() => {
       setSaving(false);
@@ -30,26 +40,39 @@ export function InsertRow({
         <span className="font-semibold text-ink">New row</span>
         <span className="text-faint">— leave a field blank to use its default</span>
       </div>
-      <div className="flex flex-wrap gap-2">
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-2">
         {columns.map((c, j) => (
-          <label key={c} className="flex flex-col gap-0.5">
-            <span className="font-mono text-[10.5px] text-faint">{c}</span>
-            <input
+          <div
+            key={c}
+            className={`flex min-w-0 flex-col gap-0.5 ${
+              isJsonColumnType(columnTypes?.[j]) ? "md:col-span-2" : ""
+            }`}
+          >
+            <span className="flex items-center gap-1.5 font-mono text-[10.5px] text-faint">
+              {c}
+              {columnTypes?.[j] && (
+                <span className="rounded bg-panel3 px-1 text-[9px] uppercase">
+                  {columnTypes[j]}
+                </span>
+              )}
+            </span>
+            <ValueEditor
               value={draft[j] ?? ""}
-              spellCheck={false}
-              onChange={(e) => {
-                setDraft((d) => d.map((x, k) => (k === j ? e.target.value : x)));
+              columnType={columnTypes?.[j]}
+              disabled={saving}
+              allowEmpty
+              onChange={(value) => {
+                setDraft((d) => d.map((x, k) => (k === j ? value : x)));
               }}
-              className="w-40 rounded border border-line bg-panel px-1.5 py-1 font-mono text-[12px] outline-none focus:border-acc"
             />
-          </label>
+          </div>
         ))}
       </div>
       <div className="mt-2.5 flex gap-2">
         <button
           type="button"
           onClick={submit}
-          disabled={saving}
+          disabled={saving || invalidJson}
           className="press inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-semibold text-white shadow-glow disabled:opacity-40"
           style={{ background: GRADIENT }}
         >

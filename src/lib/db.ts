@@ -13,6 +13,8 @@ export interface ConnInfo {
 
 export interface QueryResult {
   columns: string[];
+  /** Native database type for each result column (e.g. JSONB, VARCHAR). */
+  columnTypes?: string[];
   rows: (string | null)[][];
   rowsAffected: number;
 }
@@ -44,11 +46,7 @@ export function dbDatabases(id: string): Promise<string[]> {
  * constraints (MySQL: FOREIGN_KEY_CHECKS off for the operation; Postgres:
  * DROP … CASCADE). Resolves with the number of tables dropped.
  */
-export function dbDropTables(
-  id: string,
-  tables: string[],
-  disableFk: boolean,
-): Promise<number> {
+export function dbDropTables(id: string, tables: string[], disableFk: boolean): Promise<number> {
   return invoke<number>("db_drop_tables", { id, tables, disableFk });
 }
 

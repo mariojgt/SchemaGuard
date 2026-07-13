@@ -1,7 +1,10 @@
 import type { Schema } from "@schemaguard/core";
 import {
+  AlertCircle,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Clock3,
   Copy,
   Database,
   Download,
@@ -10,6 +13,11 @@ import {
   GitBranch,
   GitCompare,
   Hash,
+  ListChecks,
+  Loader2,
+  MoreHorizontal,
+  PanelLeftClose,
+  PanelLeftOpen,
   Play,
   Plug,
   PlugZap,
@@ -77,6 +85,17 @@ const PAGE = 100;
 // after such a statement runs in the Query tab (e.g. importing a dump).
 const DDL_RE = /\b(?:create|drop|alter|rename)\s+(?:temporary\s+|temp\s+)?(?:table|view)\b/i;
 
+type QueryRunStatus =
+  | { state: "running" }
+  | { state: "success"; durationMs: number; summary: string }
+  | { state: "error"; durationMs: number };
+
+function formatDuration(durationMs: number): string {
+  return durationMs < 1000
+    ? `${String(Math.max(1, Math.round(durationMs)))} ms`
+    : `${(durationMs / 1000).toFixed(2)} s`;
+}
+
 interface Form {
   name: string;
   dialect: DbDialect;
@@ -125,6 +144,8 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
   const [tables, setTables] = useState<string[]>([]);
   // Tables checked for a bulk drop, plus the confirm-dialog + in-flight flags.
   const [selectedTables, setSelectedTables] = useState<Set<string>>(new Set());
+  const [managingTables, setManagingTables] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [dropOpen, setDropOpen] = useState(false);
   const [dropping, setDropping] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -145,6 +166,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<{ col: string; dir: "asc" | "desc" } | null>(null);
   const [pkColumns, setPkColumns] = useState<string[]>([]);
+  const [pkLoading, setPkLoading] = useState(false);
   // Right-click menu (build SQL searches from a table or a record).
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
 
@@ -164,6 +186,30 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
   const [resultError, setResultError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("SELECT 1;");
+  // Query results are intentionally separate from the open table's rows. A
+  // query must never replace the editable Data grid with columns from a JOIN or
+  // another table.
+  const [queryResult, setQueryResult] = useState<QueryResult | null>(null);
+  const [queryError, setQueryError] = useState<string | null>(null);
+  const [queryRunning, setQueryRunning] = useState(false);
+  const [queryStatus, setQueryStatus] = useState<QueryRunStatus | null>(null);
+
+  const mountedRef = useRef(true);
+  const connIdRef = useRef<string | null>(null);
+  const connectingRef = useRef(false);
+  const queryRunningRef = useRef(false);
+
+  // DatabasePanel is unmounted when the user changes top-level workspace. Close
+  // its native connection then, as well as on the explicit Disconnect action.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const id = connIdRef.current;
+      connIdRef.current = null;
+      if (id) void dbDisconnect(id).catch(() => undefined);
+    };
+  }, []);
 
   const set = <K extends keyof Form>(k: K, v: Form[K]) => {
     setForm((f) => ({ ...f, [k]: v }));
@@ -211,14 +257,28 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
       });
   };
 
-  // Open a connection and load its tables + database list. Shared by the
-  // initial connect and the database switcher. Resolves with the new conn id.
-  const openConnection = (info: ConnInfo, name: string, save: boolean): Promise<string> =>
-    dbConnect(info).then((id) => {
+  // Open and verify a connection before exposing it to the UI. If table loading
+  // fails, close the newly-created native session instead of leaving a partial
+  // connection alive.
+  const openConnection = async (info: ConnInfo, name: string, save: boolean): Promise<string> => {
+    const id = await dbConnect(info);
+    try {
+      const [ts, dbs] = await Promise.all([
+        dbTables(id),
+        dbDatabases(id).catch((): string[] => []),
+      ]);
+      if (!mountedRef.current) {
+        await dbDisconnect(id).catch(() => undefined);
+        throw new Error("Connection cancelled because the database workspace was closed.");
+      }
+
+      const previous = connIdRef.current;
+      connIdRef.current = id;
       setConnId(id);
       setConnName(name);
       setConnDialect(info.dialect);
       setActiveInfo(info);
+      setDatabases(dbs);
       if (save) {
         saveConn({
           name,
@@ -232,64 +292,74 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
           ...(remember ? { password: info.password } : {}),
         });
       }
-      // Best-effort: a failed list just hides the switcher, never blocks connect.
-      void dbDatabases(id)
-        .then(setDatabases)
-        .catch(() => {
-          setDatabases([]);
-        });
-      return dbTables(id).then((ts) => {
-        setTables(ts);
-        setSelectedTables(new Set());
-        setView("data");
-        setOffset(0);
-        setSearch("");
-        setSort(null);
-        const first = ts[0];
-        if (first) {
-          setSelected(first);
-          loadData(id, first, 0, "", null);
-          loadPk(id, info.dialect, first);
-          loadCount(id, first);
-        } else {
-          setSelected(null);
-          setResult(null);
-        }
-        return id;
-      });
-    });
+      setTables(ts);
+      setSelectedTables(new Set());
+      setManagingTables(false);
+      setTableFilter("");
+      setView("data");
+      setOffset(0);
+      setSearch("");
+      setSort(null);
+      setResultError(null);
+      setQueryResult(null);
+      setQueryError(null);
+      setQueryStatus(null);
+      const first = ts[0];
+      if (first) {
+        setSelected(first);
+        loadData(id, first, 0, "", null);
+        loadPk(id, info.dialect, first);
+        loadCount(id, first, info.dialect);
+      } else {
+        setSelected(null);
+        setResult(null);
+      }
+      if (previous && previous !== id) {
+        void dbDisconnect(previous).catch(() => undefined);
+      }
+      return id;
+    } catch (error) {
+      await dbDisconnect(id).catch(() => undefined);
+      throw error;
+    }
+  };
 
   const connect = (info: ConnInfo, name: string) => {
+    if (connectingRef.current) return;
+    connectingRef.current = true;
     setConnecting(true);
     setConnError(null);
     openConnection(info, name, true)
       .catch((e: unknown) => {
-        setConnError(e instanceof Error ? e.message : String(e));
+        if (mountedRef.current) setConnError(e instanceof Error ? e.message : String(e));
       })
       .finally(() => {
-        setConnecting(false);
+        connectingRef.current = false;
+        if (mountedRef.current) setConnecting(false);
       });
   };
 
   // phpMyAdmin-style database switch: reconnect to the same server on a
   // different database, then drop the previous connection on success.
   const switchDatabase = (database: string) => {
-    if (!activeInfo || connecting || database === activeInfo.database) return;
-    const previous = connId;
+    if (!activeInfo || connectingRef.current || database === activeInfo.database) return;
+    connectingRef.current = true;
     setConnecting(true);
     setConnError(null);
     openConnection({ ...activeInfo, database }, connName, false)
       .then(() => {
-        if (previous) void dbDisconnect(previous).catch(() => undefined);
-        toast.success(`Switched to “${database}”.`);
+        if (mountedRef.current) toast.success(`Switched to “${database}”.`);
       })
       .catch((e: unknown) => {
-        toast.error(
-          `Couldn't switch to “${database}”: ${e instanceof Error ? e.message : String(e)}`,
-        );
+        if (mountedRef.current) {
+          toast.error(
+            `Couldn't switch to “${database}”: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
       })
       .finally(() => {
-        setConnecting(false);
+        connectingRef.current = false;
+        if (mountedRef.current) setConnecting(false);
       });
   };
 
@@ -306,9 +376,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
         switchDatabase(trimmed);
       })
       .catch((e: unknown) => {
-        toast.error(
-          `Couldn't create “${trimmed}”: ${e instanceof Error ? e.message : String(e)}`,
-        );
+        toast.error(`Couldn't create “${trimmed}”: ${e instanceof Error ? e.message : String(e)}`);
       })
       .finally(() => {
         setCreatingDb(false);
@@ -316,19 +384,26 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
   };
 
   const disconnect = () => {
-    if (connId) void dbDisconnect(connId).catch(() => undefined);
+    const id = connIdRef.current;
+    connIdRef.current = null;
+    if (id) void dbDisconnect(id).catch(() => undefined);
     setConnId(null);
     setActiveInfo(null);
     setDatabases([]);
     setTables([]);
     setSelectedTables(new Set());
+    setManagingTables(false);
     setDropOpen(false);
     setSelected(null);
     setResult(null);
     setResultError(null);
+    setQueryResult(null);
+    setQueryError(null);
+    setQueryStatus(null);
     setDiagramSchema(null);
     setDiagramError(null);
     setPkColumns([]);
+    setPkLoading(false);
     setRowCount(null);
     setInserting(false);
   };
@@ -354,6 +429,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
         toast.success(`Dropped ${String(n)} table${n === 1 ? "" : "s"}.`);
         setDropOpen(false);
         setSelectedTables(new Set());
+        setManagingTables(false);
         // The cached introspection is now stale (Structure / Diagram tabs).
         setDiagramSchema(null);
         return dbTables(id).then((ts) => {
@@ -385,17 +461,21 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
   // Look up the table's primary key so rows can be edited safely (best-effort).
   const loadPk = (id: string, dialect: DbDialect, table: string) => {
     setPkColumns([]);
+    setPkLoading(true);
     void fetchPrimaryKey(id, dialect, table)
       .then(setPkColumns)
       .catch(() => {
         setPkColumns([]);
+      })
+      .finally(() => {
+        setPkLoading(false);
       });
   };
 
   // Best-effort total row count for the open table (phpMyAdmin shows this).
-  const loadCount = (id: string, table: string) => {
+  const loadCount = (id: string, table: string, dialect: DbDialect = connDialect) => {
     setRowCount(null);
-    void dbQuery(id, `SELECT COUNT(*) AS n FROM ${quoteIdent(connDialect, table)}`)
+    void dbQuery(id, `SELECT COUNT(*) AS n FROM ${quoteIdent(dialect, table)}`)
       .then((r) => {
         const n = Number(r.rows[0]?.[0] ?? "");
         setRowCount(Number.isFinite(n) ? n : null);
@@ -532,25 +612,28 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
   };
 
   // Export the current result grid to a downloaded CSV, JSON or SQL file.
-  const exportResult = (format: "csv" | "json" | "sql") => {
+  const exportResult = (
+    format: "csv" | "json" | "sql",
+    source: QueryResult | null = result,
+    base = selected ?? "query-result",
+  ) => {
     setExportOpen(false);
-    if (!result || result.columns.length === 0) {
+    if (!source || source.columns.length === 0) {
       toast.error("Nothing to export.");
       return;
     }
-    const base = selected ?? "query";
     if (format === "csv") {
-      downloadText(`${base}.csv`, toCsv(result.columns, result.rows), "text/csv");
+      downloadText(`${base}.csv`, toCsv(source.columns, source.rows), "text/csv");
     } else if (format === "json") {
-      downloadText(`${base}.json`, toJson(result.columns, result.rows), "application/json");
+      downloadText(`${base}.json`, toJson(source.columns, source.rows), "application/json");
     } else {
       downloadText(
         `${base}.sql`,
-        toSqlInserts(connDialect, base, result.columns, result.rows),
+        toSqlInserts(connDialect, base, source.columns, source.rows),
         "text/plain",
       );
     }
-    toast.success(`Exported ${String(result.rows.length)} row(s) as ${format.toUpperCase()}.`);
+    toast.success(`Exported ${String(source.rows.length)} row(s) as ${format.toUpperCase()}.`);
   };
 
   const page = (delta: number) => {
@@ -701,25 +784,44 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
   };
 
   const runQuery = (sql: string = query) => {
-    if (!connId) return;
-    setLoading(true);
-    setResultError(null);
     const trimmed = sql.trim();
-    if (trimmed.length > 0) {
-      // Record in history (newest first, deduped, capped).
-      setHistory((h) => [trimmed, ...h.filter((q) => q !== trimmed)].slice(0, 15));
+    if (!connId || queryRunningRef.current) return;
+    if (trimmed.length === 0) {
+      toast.info("Enter a SQL query first.");
+      return;
     }
+
+    const startedAt = performance.now();
+    queryRunningRef.current = true;
+    setQueryRunning(true);
+    setQueryError(null);
+    setQueryStatus({ state: "running" });
+    // Record in history (newest first, deduped, capped).
+    setHistory((h) => [trimmed, ...h.filter((q) => q !== trimmed)].slice(0, 15));
+
     dbQuery(connId, sql)
       .then((r) => {
-        setResult(r);
+        if (!mountedRef.current) return;
+        setQueryResult(r);
+        const rowCount = r.rows.length;
+        const summary =
+          r.columns.length > 0
+            ? `${String(rowCount)} row${rowCount === 1 ? "" : "s"} returned`
+            : r.rowsAffected > 0
+              ? `${String(r.rowsAffected)} row${r.rowsAffected === 1 ? "" : "s"} affected`
+              : "Query completed";
+        setQueryStatus({ state: "success", durationMs: performance.now() - startedAt, summary });
         // If the statement created/dropped/altered tables, refresh the sidebar.
         if (DDL_RE.test(trimmed)) refreshTables(true);
       })
       .catch((e: unknown) => {
-        setResultError(e instanceof Error ? e.message : String(e));
+        if (!mountedRef.current) return;
+        setQueryError(e instanceof Error ? e.message : String(e));
+        setQueryStatus({ state: "error", durationMs: performance.now() - startedAt });
       })
       .finally(() => {
-        setLoading(false);
+        queryRunningRef.current = false;
+        if (mountedRef.current) setQueryRunning(false);
       });
   };
 
@@ -727,7 +829,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
   // database. Destructive/locking statements open a confirm; everything else
   // (SELECTs, scoped writes, safe DDL) runs straight through with no friction.
   const requestRun = (sql: string) => {
-    if (!connId) return;
+    if (!connId || queryRunningRef.current) return;
     const findings = scanDestructive(sql);
     if (findings.length > 0) {
       setGuard({ sql, findings });
@@ -749,7 +851,6 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
   const openInQuery = (sql: string) => {
     setQuery(sql);
     setView("query");
-    setSelected(null);
     requestRun(sql);
   };
 
@@ -897,16 +998,21 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
   // ---- not connected: connection manager ----
   if (connId === null) {
     return (
-      <div className="grid h-full place-items-center overflow-auto p-6">
-        <div className="glass w-[460px] max-w-full animate-pop rounded-2xl border border-line/70 p-6 shadow-2xl">
-          <div className="mb-4 flex items-center gap-2">
+      <div className="dot-grid grid h-full place-items-center overflow-auto p-6">
+        <div className="glass-strong lit w-[520px] max-w-full animate-pop rounded-2xl border border-line/70 p-6 shadow-2xl">
+          <div className="mb-5 flex items-start gap-3">
             <span
-              className="grid h-7 w-7 place-items-center rounded-lg text-white"
+              className="grid h-10 w-10 flex-none place-items-center rounded-xl text-white shadow-glow"
               style={{ background: GRADIENT }}
             >
-              <Database size={15} />
+              <Database size={19} />
             </span>
-            <div className="text-balance text-[15px] font-bold">Connect to a database</div>
+            <div>
+              <div className="text-balance text-[16px] font-bold">Connect to a database</div>
+              <p className="mt-0.5 text-pretty text-[11.5px] leading-relaxed text-dim">
+                Open one focused, live session to browse tables, edit rows and run SQL.
+              </p>
+            </div>
           </div>
 
           {!desktop && (
@@ -1010,6 +1116,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
 
           <button
             type="button"
+            data-testid="database-connect"
             disabled={!desktop || connecting || form.database.trim() === ""}
             onClick={() => {
               const { name, ...info } = form;
@@ -1018,7 +1125,7 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
             className="press mt-4 inline-flex w-full items-center justify-center gap-2 rounded-lg py-2.5 text-[13px] font-semibold text-white shadow-glow disabled:opacity-40 disabled:shadow-none"
             style={{ background: GRADIENT }}
           >
-            <Plug size={15} />
+            {connecting ? <Loader2 size={15} className="animate-spin" /> : <Plug size={15} />}
             {connecting ? "Connecting…" : "Connect"}
           </button>
 
@@ -1062,15 +1169,12 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
             </div>
           )}
         </div>
-        <style>{`.inp{width:100%;border-radius:8px;border:1px solid rgb(var(--c-line));background:rgb(var(--c-panel2));padding:7px 9px;font-size:12.5px;outline:none}`}</style>
       </div>
     );
   }
 
   // ---- connected: client workspace ----
-  const visibleTables = tables.filter((t) =>
-    t.toLowerCase().includes(tableFilter.toLowerCase()),
-  );
+  const visibleTables = tables.filter((t) => t.toLowerCase().includes(tableFilter.toLowerCase()));
   const allVisibleSelected =
     visibleTables.length > 0 && visibleTables.every((t) => selectedTables.has(t));
   const toggleSelectAllVisible = () => {
@@ -1084,93 +1188,112 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex h-10 flex-none items-center gap-2 border-b border-line bg-panel px-3">
-        <PlugZap size={15} className="text-acc" />
-        <span className="text-[12.5px] font-semibold">{connName}</span>
-        {activeInfo && (
-          <>
-            <label
-              className="ml-1 flex items-center gap-1 text-[11.5px] text-dim"
-              title="Switch database"
-            >
-              <Database size={13} className="text-faint" />
-              <select
-                value={activeInfo.database}
-                disabled={connecting}
-                onChange={(e) => {
-                  switchDatabase(e.target.value);
-                }}
-                className="max-w-[180px] rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] text-ink outline-none focus:border-acc disabled:opacity-50"
+      <div className="flex flex-none flex-col border-b border-line bg-panel">
+        <div className="flex h-12 items-center gap-2 px-3">
+          <span className="relative grid h-8 w-8 flex-none place-items-center rounded-lg bg-low/10 text-low">
+            <PlugZap size={15} />
+            <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full border-2 border-panel bg-low" />
+          </span>
+          <div className="min-w-0">
+            <div className="truncate text-[12.5px] font-semibold">{connName}</div>
+            <div className="text-[10px] uppercase tracking-wide text-low">
+              {connecting ? "Switching…" : `Connected · ${connDialect}`}
+            </div>
+          </div>
+          {activeInfo && (
+            <>
+              <label
+                className="ml-2 flex items-center gap-1.5 text-[11.5px] text-dim"
+                title="Switch database"
               >
-                {(databases.includes(activeInfo.database)
-                  ? databases
-                  : [activeInfo.database, ...databases]
-                ).map((d) => (
-                  <option key={d} value={d}>
-                    {d}
-                  </option>
-                ))}
-              </select>
-            </label>
+                <Database size={13} className="text-faint" />
+                <select
+                  value={activeInfo.database}
+                  disabled={connecting}
+                  onChange={(e) => {
+                    switchDatabase(e.target.value);
+                  }}
+                  className="max-w-[190px] rounded-md border border-line bg-panel2 px-2 py-1.5 text-[11.5px] font-medium text-ink outline-none focus:border-acc disabled:opacity-50"
+                >
+                  {(databases.includes(activeInfo.database)
+                    ? databases
+                    : [activeInfo.database, ...databases]
+                  ).map((d) => (
+                    <option key={d} value={d}>
+                      {d}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="button"
+                onClick={() => {
+                  setCreateDbOpen(true);
+                }}
+                disabled={connecting}
+                title="Create a new database on this server"
+                className="press inline-flex items-center gap-1 rounded-md border border-line bg-panel2 px-2 py-1.5 text-[11.5px] text-dim hover:border-acc/50 hover:text-acc disabled:opacity-50"
+              >
+                <Plus size={13} />
+                New DB
+              </button>
+            </>
+          )}
+          <div className="ml-auto flex items-center gap-1.5">
             <button
               type="button"
               onClick={() => {
-                setCreateDbOpen(true);
+                setImportSqlOpen(true);
               }}
-              disabled={connecting}
-              title="Create a new database on this server"
-              className="press inline-flex items-center gap-1 rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] text-dim hover:border-acc/50 hover:text-acc disabled:opacity-50"
+              disabled={connecting || queryRunning}
+              title="Run a .sql file (schema + data) against this database"
+              className="press inline-flex items-center gap-1.5 rounded-lg border border-line bg-panel2 px-2.5 py-1.5 text-[11.5px] hover:border-acc/50 hover:text-acc disabled:opacity-40"
             >
-              <Plus size={13} />
-              New DB
+              <Upload size={13} />
+              Import SQL
             </button>
-          </>
-        )}
-        <div className="ml-3 flex gap-0.5 rounded-lg border border-line bg-panel2 p-0.5">
-          <Tab label="Data" active={view === "data"} onClick={() => setView("data")} />
-          <Tab label="Structure" active={view === "structure"} onClick={openStructure} />
-          <Tab label="Query" active={view === "query"} onClick={() => setView("query")} />
-          <Tab label="Diagram" active={view === "diagram"} onClick={openDiagram} />
+            <button
+              type="button"
+              onClick={compareWithDesign}
+              disabled={comparing || connecting || queryRunning}
+              title="Diff your canvas design against this live database"
+              className="press inline-flex items-center gap-1.5 rounded-lg border border-line bg-panel2 px-2.5 py-1.5 text-[11.5px] hover:border-acc/50 hover:text-acc disabled:opacity-40"
+            >
+              <GitCompare size={13} />
+              {comparing ? "Comparing…" : "Compare"}
+            </button>
+            <button
+              type="button"
+              onClick={importToDiagram}
+              disabled={importing || connecting || queryRunning}
+              title="Reverse-engineer this database into a diagram"
+              className="press inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11.5px] font-semibold text-white shadow-glow disabled:opacity-40"
+              style={{ background: GRADIENT }}
+            >
+              <GitBranch size={13} />
+              {importing ? "Reading…" : "Import to diagram"}
+            </button>
+            <button
+              type="button"
+              onClick={disconnect}
+              disabled={connecting || queryRunning}
+              className="press rounded-lg border border-line bg-panel2 px-2.5 py-1.5 text-[11.5px] hover:border-high/50 hover:text-high disabled:opacity-40"
+            >
+              Disconnect
+            </button>
+          </div>
         </div>
-        <button
-          type="button"
-          onClick={() => {
-            setImportSqlOpen(true);
-          }}
-          title="Run a .sql file (schema + data) against this database"
-          className="press ml-auto inline-flex items-center gap-1.5 rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12px] hover:border-acc/50 hover:text-acc"
-        >
-          <Upload size={14} />
-          Import SQL
-        </button>
-        <button
-          type="button"
-          onClick={compareWithDesign}
-          disabled={comparing}
-          title="Diff your canvas design against this live database"
-          className="press inline-flex items-center gap-1.5 rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12px] hover:border-acc/50 hover:text-acc disabled:opacity-40"
-        >
-          <GitCompare size={14} />
-          {comparing ? "Comparing…" : "Compare with design"}
-        </button>
-        <button
-          type="button"
-          onClick={importToDiagram}
-          disabled={importing}
-          title="Reverse-engineer this database into a diagram"
-          className="press inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-semibold text-white shadow-glow disabled:opacity-40"
-          style={{ background: GRADIENT }}
-        >
-          <GitBranch size={14} />
-          {importing ? "Reading schema…" : "Import to diagram"}
-        </button>
-        <button
-          type="button"
-          onClick={disconnect}
-          className="press rounded-lg border border-line bg-panel2 px-3 py-1.5 text-[12px] hover:border-high/50 hover:text-high"
-        >
-          Disconnect
-        </button>
+        <div className="flex h-9 items-center px-3">
+          <div className="flex gap-0.5 rounded-lg border border-line bg-panel2 p-0.5">
+            <Tab label="Data" active={view === "data"} onClick={() => setView("data")} />
+            <Tab label="Structure" active={view === "structure"} onClick={openStructure} />
+            <Tab label="Query" active={view === "query"} onClick={() => setView("query")} />
+            <Tab label="Diagram" active={view === "diagram"} onClick={openDiagram} />
+          </div>
+          <span className="ml-auto text-[10.5px] text-faint">
+            One live session · closes when you leave Database mode
+          </span>
+        </div>
       </div>
 
       {view === "diagram" ? (
@@ -1194,128 +1317,321 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
             )}
         </div>
       ) : (
-        <div className="grid min-h-0 flex-1 grid-cols-[220px_1fr]">
-          <aside className="min-h-0 overflow-auto border-r border-line bg-panel p-2">
-            <div className="flex items-center px-2 py-1">
-              <span className="text-[11px] font-bold uppercase tracking-wider text-faint">
-                Tables · {tables.length}
-              </span>
-              <button
-                type="button"
-                onClick={() => {
-                  refreshTables();
-                }}
-                disabled={refreshing}
-                title="Refresh table list"
-                className="relative ml-auto grid h-5 w-5 place-items-center rounded text-faint after:absolute after:left-1/2 after:top-1/2 after:size-9 after:-translate-x-1/2 after:-translate-y-1/2 hover:bg-panel2 hover:text-ink disabled:opacity-50"
-              >
-                <RefreshCw size={12} className={refreshing ? "animate-spin" : ""} />
-              </button>
-            </div>
-            {tables.length > 0 && (
-              <div className="relative px-1 pb-1.5">
-                <Search size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-faint" />
-                <input
-                  value={tableFilter}
-                  onChange={(e) => {
-                    setTableFilter(e.target.value);
-                  }}
-                  placeholder="Filter tables…"
-                  className="w-full rounded-md border border-line bg-panel2 py-1 pl-7 pr-2 text-[12px] outline-none focus:border-acc"
-                />
-              </div>
-            )}
-            {tables.length > 0 && (
-              <div className="mb-1 flex items-center gap-2 px-2 py-0.5">
-                <label className="flex items-center gap-1.5 text-[11px] text-faint">
-                  <input
-                    type="checkbox"
-                    checked={allVisibleSelected}
-                    onChange={toggleSelectAllVisible}
-                    className="h-3.5 w-3.5 accent-[#a64bff]"
-                  />
-                  {selectedTables.size > 0 ? `${String(selectedTables.size)} selected` : "Select all"}
-                </label>
-                {selectedTables.size > 0 && (
+        <div
+          className={`grid min-h-0 flex-1 transition-[grid-template-columns] duration-200 ${
+            sidebarCollapsed ? "grid-cols-[52px_1fr]" : "grid-cols-[248px_1fr]"
+          }`}
+        >
+          <aside
+            data-testid="database-sidebar"
+            data-collapsed={sidebarCollapsed}
+            className="flex min-h-0 flex-col overflow-hidden border-r border-line bg-panel"
+          >
+            {sidebarCollapsed ? (
+              <>
+                <div className="flex flex-none flex-col items-center gap-1 border-b border-line px-1.5 py-2">
                   <button
                     type="button"
+                    aria-label="Expand table sidebar"
+                    title="Expand table sidebar"
                     onClick={() => {
-                      setDropOpen(true);
+                      setSidebarCollapsed(false);
                     }}
-                    className="ml-auto inline-flex items-center gap-1 rounded-md border border-crit/40 bg-crit/10 px-2 py-0.5 text-[11px] font-semibold text-crit hover:bg-crit/20"
+                    className="grid h-8 w-8 place-items-center rounded-lg text-faint hover:bg-panel2 hover:text-ink"
                   >
-                    <Trash2 size={12} />
-                    Drop
+                    <PanelLeftOpen size={15} />
                   </button>
-                )}
-              </div>
-            )}
-            {tables.length === 0 && (
-              <p className="text-pretty px-2 py-2 text-[11px] leading-snug text-med">
-                No tables in the selected database. The{" "}
-                <span className="font-semibold">Database</span> field is probably empty or wrong —
-                disconnect and set it (e.g. your schema name). Run{" "}
-                <span className="font-mono">SELECT DATABASE();</span> in the Query tab to see what
-                you're connected to.
-              </p>
-            )}
-            {visibleTables.map((t) => {
-              const active = selected === t && (view === "data" || view === "structure");
-              const checked = selectedTables.has(t);
-              return (
-                <div
-                  key={t}
-                  className={`flex items-center gap-1.5 rounded-md px-2 py-1.5 transition-colors ${
-                    active ? "bg-acc/15" : checked ? "bg-panel2" : "hover:bg-panel2"
-                  }`}
-                >
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => {
-                      toggleTableSelect(t);
-                    }}
-                    title="Select for bulk drop"
-                    className="h-3.5 w-3.5 flex-none accent-[#a64bff]"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      openTable(t);
-                    }}
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      setMenu({ x: e.clientX, y: e.clientY, items: tableMenu(t) });
-                    }}
-                    className={`flex min-w-0 flex-1 items-center gap-2 text-left text-[12.5px] ${
-                      active ? "text-acc" : ""
-                    }`}
-                  >
-                    <Table2 size={13} className="flex-none opacity-70" />
-                    <span className="truncate">{t}</span>
-                  </button>
+                  <span className="rounded bg-panel3 px-1.5 py-0.5 text-[9px] font-semibold tabular-nums text-faint">
+                    {tables.length}
+                  </span>
                 </div>
-              );
-            })}
-            {tables.length > 0 && visibleTables.length === 0 && (
-              <p className="px-2 py-2 text-[11px] text-faint">No tables match “{tableFilter}”.</p>
+                <div className="flex min-h-0 flex-1 flex-col items-center gap-1 overflow-y-auto py-2">
+                  {tables.map((table) => {
+                    const active = selected === table && (view === "data" || view === "structure");
+                    return (
+                      <button
+                        key={table}
+                        type="button"
+                        aria-label={`Open ${table}`}
+                        aria-current={active ? "page" : undefined}
+                        title={table}
+                        onClick={() => {
+                          openTable(table);
+                        }}
+                        className={`grid h-8 w-8 flex-none place-items-center rounded-lg transition-colors ${
+                          active
+                            ? "bg-acc/15 text-acc ring-1 ring-acc/20"
+                            : "text-faint hover:bg-panel2 hover:text-ink"
+                        }`}
+                      >
+                        <Table2 size={14} />
+                      </button>
+                    );
+                  })}
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex-none border-b border-line px-3 pb-3 pt-3">
+                  <div className="flex items-center gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[11px] font-bold uppercase tracking-wider text-faint">
+                          Tables
+                        </span>
+                        <span className="rounded bg-panel3 px-1.5 py-0.5 text-[9px] font-semibold tabular-nums text-dim">
+                          {tables.length}
+                        </span>
+                      </div>
+                      <div
+                        className="mt-0.5 truncate text-[10px] text-faint"
+                        title={activeInfo?.database || connName}
+                      >
+                        {activeInfo?.database || connName}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        refreshTables();
+                      }}
+                      disabled={refreshing}
+                      title="Refresh tables and current data"
+                      aria-label="Refresh tables"
+                      className="grid h-7 w-7 place-items-center rounded-lg text-faint hover:bg-panel2 hover:text-ink disabled:opacity-50"
+                    >
+                      <RefreshCw size={13} className={refreshing ? "animate-spin" : ""} />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="Collapse table sidebar"
+                      title="Collapse table sidebar"
+                      onClick={() => {
+                        setSidebarCollapsed(true);
+                        setManagingTables(false);
+                        setSelectedTables(new Set());
+                      }}
+                      className="grid h-7 w-7 place-items-center rounded-lg text-faint hover:bg-panel2 hover:text-ink"
+                    >
+                      <PanelLeftClose size={13} />
+                    </button>
+                  </div>
+
+                  {tables.length > 0 && (
+                    <div className="mt-2.5 flex gap-1.5">
+                      <div className="relative min-w-0 flex-1">
+                        <Search
+                          size={12}
+                          className="absolute left-2.5 top-1/2 -translate-y-1/2 text-faint"
+                        />
+                        <input
+                          value={tableFilter}
+                          aria-label="Filter tables"
+                          onChange={(event) => {
+                            setTableFilter(event.target.value);
+                          }}
+                          placeholder="Find a table…"
+                          className="w-full rounded-lg border border-line bg-panel2 py-1.5 pl-7 pr-7 text-[11.5px] outline-none focus:border-acc focus:ring-2 focus:ring-acc/10"
+                        />
+                        {tableFilter.length > 0 && (
+                          <button
+                            type="button"
+                            title="Clear table filter"
+                            onClick={() => {
+                              setTableFilter("");
+                            }}
+                            className="absolute right-2 top-1/2 grid -translate-y-1/2 place-items-center text-faint hover:text-ink"
+                          >
+                            <X size={11} />
+                          </button>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        aria-label={managingTables ? "Finish managing tables" : "Manage tables"}
+                        title={managingTables ? "Finish managing tables" : "Select tables to drop"}
+                        onClick={() => {
+                          if (managingTables) setSelectedTables(new Set());
+                          setManagingTables((current) => !current);
+                        }}
+                        className={`inline-flex flex-none items-center gap-1 rounded-lg border px-2 py-1 text-[10.5px] font-medium ${
+                          managingTables
+                            ? "border-acc/40 bg-acc/15 text-acc"
+                            : "border-line bg-panel2 text-dim hover:border-line2 hover:text-ink"
+                        }`}
+                      >
+                        <ListChecks size={12} />
+                        {managingTables ? "Done" : "Manage"}
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {managingTables && tables.length > 0 && (
+                  <div className="flex flex-none items-center gap-2 border-b border-line bg-panel2/60 px-3 py-2">
+                    <label className="flex min-w-0 items-center gap-1.5 text-[10.5px] text-dim">
+                      <input
+                        type="checkbox"
+                        checked={allVisibleSelected}
+                        onChange={toggleSelectAllVisible}
+                        className="h-3.5 w-3.5 accent-[#a64bff]"
+                      />
+                      <span className="truncate">
+                        {selectedTables.size > 0
+                          ? `${String(selectedTables.size)} selected`
+                          : `Select ${String(visibleTables.length)}`}
+                      </span>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDropOpen(true);
+                      }}
+                      disabled={selectedTables.size === 0}
+                      className="ml-auto inline-flex items-center gap-1 rounded-md border border-crit/40 bg-crit/10 px-2 py-1 text-[10.5px] font-semibold text-crit hover:bg-crit/20 disabled:cursor-not-allowed disabled:opacity-35"
+                    >
+                      <Trash2 size={11} />
+                      Drop
+                    </button>
+                  </div>
+                )}
+
+                <div className="min-h-0 flex-1 overflow-y-auto p-2">
+                  {tables.length === 0 && (
+                    <div className="m-1 rounded-xl border border-dashed border-line bg-panel2/40 p-4 text-center">
+                      <span className="mx-auto grid h-8 w-8 place-items-center rounded-lg bg-panel3 text-faint">
+                        <Table2 size={14} />
+                      </span>
+                      <div className="mt-2 text-[11.5px] font-semibold text-dim">No tables yet</div>
+                      <p className="mt-1 text-pretty text-[10.5px] leading-relaxed text-faint">
+                        Create one with SQL or confirm that the correct database is selected.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setView("query");
+                        }}
+                        className="mt-2 rounded-md border border-line bg-panel px-2 py-1 text-[10.5px] text-dim hover:border-acc/40 hover:text-acc"
+                      >
+                        Open query editor
+                      </button>
+                    </div>
+                  )}
+                  {visibleTables.map((table) => {
+                    const active = selected === table && (view === "data" || view === "structure");
+                    const checked = selectedTables.has(table);
+                    return (
+                      <div
+                        key={table}
+                        className={`group mb-0.5 flex items-center gap-1 rounded-lg border px-1.5 py-1 transition-colors ${
+                          active
+                            ? "border-acc/25 bg-acc/10"
+                            : checked
+                              ? "border-line bg-panel2"
+                              : "border-transparent hover:border-line/70 hover:bg-panel2/70"
+                        }`}
+                      >
+                        {managingTables && (
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => {
+                              toggleTableSelect(table);
+                            }}
+                            title="Select for bulk drop"
+                            aria-label={`Select ${table}`}
+                            className="ml-0.5 h-3.5 w-3.5 flex-none accent-[#a64bff]"
+                          />
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            openTable(table);
+                          }}
+                          onContextMenu={(event) => {
+                            event.preventDefault();
+                            setMenu({
+                              x: event.clientX,
+                              y: event.clientY,
+                              items: tableMenu(table),
+                            });
+                          }}
+                          aria-current={active ? "page" : undefined}
+                          className={`flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left text-[12px] ${
+                            active ? "font-semibold text-acc" : "text-dim hover:text-ink"
+                          }`}
+                        >
+                          <Table2 size={13} className="flex-none opacity-80" />
+                          <span className="truncate">{table}</span>
+                          {active && rowCount !== null && (
+                            <span className="ml-auto flex-none text-[9.5px] font-normal tabular-nums text-faint">
+                              {rowCount}
+                            </span>
+                          )}
+                        </button>
+                        {!managingTables && (
+                          <button
+                            type="button"
+                            aria-label={`Actions for ${table}`}
+                            title={`Actions for ${table}`}
+                            onClick={(event) => {
+                              const rect = event.currentTarget.getBoundingClientRect();
+                              setMenu({
+                                x: rect.right,
+                                y: rect.bottom + 4,
+                                items: tableMenu(table),
+                              });
+                            }}
+                            className="grid h-7 w-7 flex-none place-items-center rounded-md text-faint opacity-60 hover:bg-panel3 hover:text-ink group-hover:opacity-100"
+                          >
+                            <MoreHorizontal size={13} />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {tables.length > 0 && visibleTables.length === 0 && (
+                    <div className="px-2 py-5 text-center">
+                      <Search size={15} className="mx-auto text-faint" />
+                      <p className="mt-1.5 text-[11px] text-faint">
+                        No tables match “{tableFilter}”.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTableFilter("");
+                        }}
+                        className="mt-1 text-[10.5px] text-acc hover:underline"
+                      >
+                        Clear filter
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </>
             )}
           </aside>
 
           <section className="flex min-h-0 flex-col">
             {view === "query" && (
-              <div className="flex flex-none flex-col gap-2 border-b border-line p-2">
+              <div className="flex flex-none flex-col gap-2.5 border-b border-line bg-panel/40 p-3">
                 <div className="flex items-center gap-2">
+                  <div className="mr-1">
+                    <div className="text-[12px] font-semibold text-ink">SQL query</div>
+                    <div className="text-[10px] text-faint">Run a selection or the full editor</div>
+                  </div>
                   <select
                     value=""
-                    disabled={history.length === 0}
+                    disabled={history.length === 0 || queryRunning}
                     onChange={(e) => {
                       if (e.target.value) setQuery(e.target.value);
                     }}
                     title="Recent queries"
                     className="max-w-[260px] rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] outline-none disabled:opacity-40"
                   >
-                    <option value="">{history.length > 0 ? "Recent queries…" : "No history yet"}</option>
+                    <option value="">
+                      {history.length > 0 ? "Recent queries…" : "No history yet"}
+                    </option>
                     {history.map((h, i) => (
                       <option key={i} value={h}>
                         {h.replace(/\s+/g, " ").slice(0, 70)}
@@ -1328,16 +1644,16 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                       key={fmt}
                       type="button"
                       onClick={() => {
-                        exportResult(fmt);
+                        exportResult(fmt, queryResult, "query-result");
                       }}
-                      disabled={!result || result.rows.length === 0}
+                      disabled={!queryResult || queryResult.rows.length === 0 || queryRunning}
                       className="press rounded-md border border-line bg-panel2 px-2 py-1 text-[11.5px] uppercase hover:border-line2 disabled:opacity-40"
                     >
                       {fmt}
                     </button>
                   ))}
                 </div>
-                <div className="flex items-end gap-2">
+                <div className="overflow-hidden rounded-xl border border-line bg-panel2 shadow-inner focus-within:border-acc/70 focus-within:ring-2 focus-within:ring-acc/10">
                   <textarea
                     ref={queryRef}
                     value={query}
@@ -1351,18 +1667,60 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                       }
                     }}
                     spellCheck={false}
-                    placeholder="SELECT * FROM users;   (⌘/Ctrl+Enter runs the selection, or all)"
-                    className="h-16 flex-1 resize-none rounded-lg border border-line bg-panel2 p-2 font-mono text-[12px] outline-none focus:border-acc"
+                    placeholder="SELECT * FROM users;"
+                    className="h-24 w-full resize-y border-0 bg-transparent p-3 font-mono text-[12px] leading-relaxed outline-none"
                   />
-                  <button
-                    type="button"
-                    onClick={runQueryOrSelection}
-                    className="press inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-[12.5px] font-semibold text-white shadow-glow"
-                    style={{ background: GRADIENT }}
-                  >
-                    <Play size={14} />
-                    Run
-                  </button>
+                  <div className="flex min-h-10 items-center gap-2 border-t border-line/70 bg-panel px-3">
+                    <div
+                      role="status"
+                      aria-live="polite"
+                      className="flex min-w-0 flex-1 items-center gap-1.5 text-[11px]"
+                    >
+                      {queryStatus?.state === "running" ? (
+                        <>
+                          <Loader2 size={12} className="animate-spin text-acc" />
+                          <span className="font-medium text-ink">Running query…</span>
+                          <span className="text-faint">Results will appear below</span>
+                        </>
+                      ) : queryStatus?.state === "success" ? (
+                        <>
+                          <CheckCircle2 size={12} className="text-low" />
+                          <span className="font-medium text-low">{queryStatus.summary}</span>
+                          <span className="inline-flex items-center gap-1 text-faint">
+                            <Clock3 size={10} />
+                            {formatDuration(queryStatus.durationMs)}
+                          </span>
+                        </>
+                      ) : queryStatus?.state === "error" ? (
+                        <>
+                          <AlertCircle size={12} className="text-crit" />
+                          <span className="font-medium text-crit">Query failed</span>
+                          <span className="inline-flex items-center gap-1 text-faint">
+                            <Clock3 size={10} />
+                            {formatDuration(queryStatus.durationMs)}
+                          </span>
+                        </>
+                      ) : (
+                        <span className="text-faint">
+                          ⌘/Ctrl+Enter runs the selection, or all SQL
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={runQueryOrSelection}
+                      disabled={queryRunning || query.trim().length === 0}
+                      className="press inline-flex min-w-[92px] items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-[12.5px] font-semibold text-white shadow-glow disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
+                      style={{ background: GRADIENT }}
+                    >
+                      {queryRunning ? (
+                        <Loader2 size={14} className="animate-spin" />
+                      ) : (
+                        <Play size={14} />
+                      )}
+                      {queryRunning ? "Running…" : "Run query"}
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -1370,6 +1728,30 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
             {view === "data" && selected && (
               <div className="flex h-10 flex-none items-center gap-2 border-b border-line px-3 text-[11.5px] text-dim">
                 <span className="font-semibold text-ink">{selected}</span>
+                {!loading && result && (
+                  <span
+                    title={
+                      pkLoading
+                        ? "Checking whether rows can be safely edited"
+                        : pkColumns.length > 0
+                          ? `Updates use primary key: ${pkColumns.join(", ")}`
+                          : "Rows need a primary key for safe editing and deletion"
+                    }
+                    className={`rounded-md px-1.5 py-0.5 text-[9.5px] font-medium ${
+                      pkLoading
+                        ? "bg-panel3 text-faint"
+                        : pkColumns.length > 0
+                          ? "bg-low/10 text-low"
+                          : "bg-med/10 text-med"
+                    }`}
+                  >
+                    {pkLoading
+                      ? "Checking row key…"
+                      : pkColumns.length > 0
+                        ? "Rows editable"
+                        : "Read only · no primary key"}
+                  </span>
+                )}
                 <div className="relative ml-2 max-w-[280px] flex-1">
                   <Search
                     size={12}
@@ -1459,8 +1841,14 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                   )}
                 </div>
                 <span className="tabular-nums">
-                  rows {offset + 1}–{offset + (result?.rows.length ?? 0)}
-                  {rowCount !== null && <span className="text-faint"> of {rowCount}</span>}
+                  {(result?.rows.length ?? 0) === 0 ? (
+                    "0 rows"
+                  ) : (
+                    <>
+                      rows {offset + 1}–{offset + (result?.rows.length ?? 0)}
+                      {rowCount !== null && <span className="text-faint"> of {rowCount}</span>}
+                    </>
+                  )}
                 </span>
                 <button
                   type="button"
@@ -1499,49 +1887,101 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
                     setMenu({ x: e.clientX, y: e.clientY, items: columnMenu(column) });
                   }}
                 />
-              ) : (
-                <>
-                  {loading && <div className="p-4 text-[12px] text-dim">Loading…</div>}
-                  {!loading && resultError && (
-                    <div className="m-3 rounded-lg border border-crit/40 bg-crit/10 p-3 font-mono text-[11.5px] text-crit">
-                      {resultError}
+              ) : view === "query" ? (
+                <div className="relative min-h-full">
+                  {queryRunning && (
+                    <div className="sticky top-0 z-20 h-0.5 overflow-hidden bg-acc/10">
+                      <div className="h-full w-full animate-pulse bg-gradient-to-r from-acc via-acc2 to-acc" />
                     </div>
                   )}
-                  {!loading && !resultError && view === "data" && inserting && selected && result && (
+                  {queryError && (
+                    <div className="m-3 flex items-start gap-2 rounded-xl border border-crit/40 bg-crit/10 p-3 text-[11.5px] text-crit">
+                      <AlertCircle size={14} className="mt-0.5 flex-none" />
+                      <div className="min-w-0">
+                        <div className="mb-1 font-semibold">The query could not be completed</div>
+                        <div className="whitespace-pre-wrap break-words font-mono leading-relaxed">
+                          {queryError}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {!queryError && queryResult && (
+                    <div className={queryRunning ? "opacity-60" : ""}>
+                      <div className="sticky top-0 z-10 flex h-8 items-center border-b border-line bg-panel/95 px-3 text-[10.5px] backdrop-blur">
+                        <span className="font-semibold uppercase tracking-wider text-faint">
+                          Results
+                        </span>
+                        <span className="ml-auto tabular-nums text-dim">
+                          {queryResult.columns.length > 0
+                            ? `${String(queryResult.rows.length)} row${queryResult.rows.length === 1 ? "" : "s"}`
+                            : "Statement completed"}
+                        </span>
+                      </div>
+                      <ResultGrid result={queryResult} />
+                    </div>
+                  )}
+                  {!queryRunning && !queryError && !queryResult && (
+                    <div className="grid min-h-[220px] place-items-center p-6 text-center">
+                      <div>
+                        <div className="mx-auto mb-2 grid h-9 w-9 place-items-center rounded-xl border border-line bg-panel2 text-faint">
+                          <Play size={15} />
+                        </div>
+                        <div className="text-[12.5px] font-semibold">Ready for a query</div>
+                        <p className="mt-1 text-[11px] text-faint">
+                          Results, errors and execution time will appear here.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <>
+                  {loading && (
+                    <div className="flex items-center gap-2 p-4 text-[12px] text-dim">
+                      <Loader2 size={13} className="animate-spin text-acc" />
+                      Loading table data…
+                    </div>
+                  )}
+                  {!loading && resultError && (
+                    <div className="m-3 flex items-start gap-2 rounded-xl border border-crit/40 bg-crit/10 p-3 text-[11.5px] text-crit">
+                      <AlertCircle size={14} className="mt-0.5 flex-none" />
+                      <span className="whitespace-pre-wrap break-words font-mono">
+                        {resultError}
+                      </span>
+                    </div>
+                  )}
+                  {!loading && !resultError && inserting && selected && result && (
                     <InsertRow
                       columns={result.columns}
+                      columnTypes={result.columnTypes}
                       onCancel={() => {
                         setInserting(false);
                       }}
                       onInsert={insertRow}
                     />
                   )}
-                  {!loading &&
-                    !resultError &&
-                    result &&
-                    (view === "data" ? (
-                      <ResultGrid
-                        result={result}
-                        sort={sort}
-                        onSort={toggleSort}
-                        pkColumns={pkColumns}
-                        onSaveRow={saveRow}
-                        onDeleteRow={deleteRow}
-                        onCellMenu={(e, column, value, row) => {
-                          e.preventDefault();
-                          setMenu({
-                            x: e.clientX,
-                            y: e.clientY,
-                            items: cellMenu(column, value, row),
-                          });
-                        }}
-                        onCellClick={(column, value) => {
-                          setDetail({ column, value });
-                        }}
-                      />
-                    ) : (
-                      <ResultGrid result={result} />
-                    ))}
+                  {!loading && !resultError && result && (
+                    <ResultGrid
+                      result={result}
+                      tableName={selected ?? undefined}
+                      sort={sort}
+                      onSort={toggleSort}
+                      pkColumns={pkColumns}
+                      onSaveRow={saveRow}
+                      onDeleteRow={deleteRow}
+                      onCellMenu={(e, column, value, row) => {
+                        e.preventDefault();
+                        setMenu({
+                          x: e.clientX,
+                          y: e.clientY,
+                          items: cellMenu(column, value, row),
+                        });
+                      }}
+                      onCellClick={(column, value) => {
+                        setDetail({ column, value });
+                      }}
+                    />
+                  )}
                 </>
               )}
             </div>
@@ -1630,8 +2070,8 @@ export function DatabasePanel({ onImported }: { onImported: () => void }) {
           message={
             <div className="flex flex-col gap-2">
               <p className="text-pretty">
-                This {guard.findings.length === 1 ? "statement" : "script"} contains operations
-                that can lose data or lock the table. They run against{" "}
+                This {guard.findings.length === 1 ? "statement" : "script"} contains operations that
+                can lose data or lock the table. They run against{" "}
                 <span className="font-semibold text-ink">{connName}</span> and can&apos;t be undone.
               </p>
               <ul className="flex flex-col gap-1.5">

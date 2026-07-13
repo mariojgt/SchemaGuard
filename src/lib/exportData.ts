@@ -33,19 +33,13 @@ export function prettyMaybeJson(value: string): { text: string; isJson: boolean 
 
 /** Result rows as a pretty-printed JSON array of objects (Beekeeper-style). */
 export function toJson(columns: string[], rows: (string | null)[][]): string {
-  const objects = rows.map((r) =>
-    Object.fromEntries(columns.map((c, i) => [c, r[i] ?? null])),
-  );
+  const objects = rows.map((r) => Object.fromEntries(columns.map((c, i) => [c, r[i] ?? null])));
   return JSON.stringify(objects, null, 2);
 }
 
 /** A single row as a pretty-printed JSON object (for "Copy row as JSON"). */
 export function rowToJson(columns: string[], row: (string | null)[]): string {
-  return JSON.stringify(
-    Object.fromEntries(columns.map((c, i) => [c, row[i] ?? null])),
-    null,
-    2,
-  );
+  return JSON.stringify(Object.fromEntries(columns.map((c, i) => [c, row[i] ?? null])), null, 2);
 }
 
 /** A batch of INSERT statements that recreate these rows in `table`. */
@@ -59,6 +53,9 @@ export function toSqlInserts(
   const tbl = quoteIdent(dialect, table);
   const cols = columns.map((c) => quoteIdent(dialect, c)).join(", ");
   return rows
-    .map((r) => `INSERT INTO ${tbl} (${cols}) VALUES (${r.map(sqlLiteral).join(", ")});`)
+    .map(
+      (r) =>
+        `INSERT INTO ${tbl} (${cols}) VALUES (${r.map((value) => sqlLiteral(value, dialect)).join(", ")});`,
+    )
     .join("\n");
 }

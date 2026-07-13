@@ -5,6 +5,7 @@ import {
   buildDeleteQuery,
   buildFilterQuery,
   buildInsertQuery,
+  buildUpdateQuery,
 } from "./browseQuery";
 
 describe("right-click menu queries", () => {
@@ -57,5 +58,16 @@ describe("right-click menu queries", () => {
     expect(
       buildDeleteQuery({ dialect: "mysql", table: "posts", where: [{ column: "id", value: "7" }] }),
     ).toBe("DELETE FROM `posts` WHERE `id` = '7'");
+  });
+
+  it("preserves JSON backslash escapes in MySQL row edits", () => {
+    expect(
+      buildUpdateQuery({
+        dialect: "mysql",
+        table: "settings",
+        set: [{ column: "payload", value: '{"path":"C:\\\\temp"}' }],
+        where: [{ column: "id", value: "1" }],
+      }),
+    ).toBe("UPDATE `settings` SET `payload` = '{\"path\":\"C:\\\\\\\\temp\"}' WHERE `id` = '1'");
   });
 });
