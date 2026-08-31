@@ -9,7 +9,7 @@ Spec docs in the repo root: `schema_guard_database_agnostic_migration_analyzer.m
 A top-bar switch toggles between:
 
 - **Designer** — the visual schema builder + multi-DB SQL + Laravel import + AI Copilot (below).
-- **Database** — a live DB client (phpMyAdmin / TablePlus style): connect to **PostgreSQL or MySQL**, browse tables, page through rows, and run arbitrary SQL. Connections run through the native Rust backend (`sqlx`), so this works in the **desktop app** (`pnpm tauri:dev`); the browser preview shows a notice since it can't open DB sockets. Saved connections are remembered locally (passwords never persisted).
+- **Database** — a live DB client (phpMyAdmin / TablePlus style): connect to **PostgreSQL or MySQL**, browse tables, page through rows, and run arbitrary SQL. Connections run through the native Rust backend (`sqlx`), so this works in the **desktop app** (`pnpm tauri:dev`); the browser preview shows a notice since it can't open DB sockets. Saved connection details are remembered locally. Passwords are stored in plain-text local storage only when you enable **Remember password**, so leave it off on shared or untrusted machines.
 
 ## Features
 
@@ -32,7 +32,7 @@ The analysis engine is a pure-TS workspace package, `packages/core` (no DOM/Taur
 
 ## Prerequisites
 
-- **Node 18+** and **pnpm 9** (`corepack enable pnpm`)
+- **Node 20.19+** and **pnpm 9** (`corepack enable pnpm`)
 - **Rust toolchain** for the desktop shell — https://rustup.rs (only for `pnpm tauri:dev`)
 - Tauri system deps — https://tauri.app/start/prerequisites/
 
@@ -51,7 +51,7 @@ pnpm format:check
 pnpm build
 ```
 
-> **AI Copilot:** open Settings (⚙), paste an Anthropic API key, then use the Copilot tab. The key is stored in local storage only.
+> **AI Copilot:** open Settings (⚙), paste an Anthropic API key, then use the Copilot tab. The key is stored in app local storage on this device, not in an OS keychain; use this only on a trusted device.
 >
 > **Icons:** before `pnpm tauri build`, generate them once: `pnpm tauri icon path/to/icon.png`.
 
