@@ -4,6 +4,11 @@ dist
 *.tsbuildinfo
 .DS_Store
 
+# Local environment configuration
+.env
+.env.*
+!.env.example
+
 # Tauri / Rust
 src-tauri/target
 src-tauri/gen
